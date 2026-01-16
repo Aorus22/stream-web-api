@@ -1,0 +1,322 @@
+package ffmpeg
+
+import (
+	"encoding/binary"
+	"fmt"
+	"io"
+	"log"
+	"math"
+	"net/http"
+	"os/exec"
+	"strconv"
+	"strings"
+	"sync"
+)
+
+// Transcoder handles real-time video transcoding using FFmpeg
+type Transcoder struct {
+	FFmpegPath  string
+	FFprobePath string
+	mu          sync.Mutex
+}
+
+// NewTranscoder creates a new transcoder
+func NewTranscoder() *Transcoder {
+	ffmpegPath := "ffmpeg"
+	ffprobePath := "ffprobe"
+
+	// Check if FFmpeg is available
+	cmd := exec.Command(ffmpegPath, "-version")
+	if err := cmd.Run(); err != nil {
+		log.Printf("⚠️ FFmpeg not found in PATH. Transcoding will not work.")
+		log.Printf("   Install FFmpeg: https://ffmpeg.org/download.html")
+		return nil
+	}
+
+	// Check if FFprobe is available
+	cmd2 := exec.Command(ffprobePath, "-version")
+	if err := cmd2.Run(); err != nil {
+		log.Printf("⚠️ FFprobe not found - duration detection disabled")
+		ffprobePath = ""
+	}
+
+	log.Printf("✅ FFmpeg found, transcoding enabled")
+	return &Transcoder{
+		FFmpegPath:  ffmpegPath,
+		FFprobePath: ffprobePath,
+	}
+}
+
+// TranscodeStream transcodes a video stream to browser-compatible format
+func (t *Transcoder) TranscodeStream(w http.ResponseWriter, r *http.Request, inputURL string, fileSize int64, filename string, startTime float64) error {
+	if t == nil {
+		return fmt.Errorf("transcoder not available (FFmpeg not found)")
+	}
+
+	// Determine output format based on Accept header or default to MP4
+	outputFormat := "mp4"
+	contentType := "video/mp4"
+
+	// Check if client prefers WebM
+	accept := r.Header.Get("Accept")
+	if strings.Contains(accept, "video/webm") {
+		outputFormat = "webm"
+		contentType = "video/webm"
+	}
+
+	log.Printf("🎬 Starting transcode: %s -> %s (start: %.1fs)", filename, outputFormat, startTime)
+
+	var args []string
+
+	if startTime > 0 {
+		args = append(args, "-ss", fmt.Sprintf("%.2f", startTime))
+	}
+
+	args = append(args,
+		"-i", inputURL,
+		"-v", "warning",
+	)
+
+	if outputFormat == "webm" {
+		args = append(args,
+			"-c:v", "libvpx-vp9",
+			"-crf", "30",
+			"-b:v", "0",
+			"-c:a", "libopus",
+			"-b:a", "128k",
+			"-f", "webm",
+		)
+	} else {
+		args = append(args,
+			"-c:v", "libx264",
+			"-preset", "ultrafast",
+			"-tune", "zerolatency",
+			"-crf", "23",
+			"-c:a", "aac",
+			"-b:a", "128k",
+			"-movflags", "frag_keyframe+empty_moov+faststart",
+			"-f", "mp4",
+		)
+	}
+
+	args = append(args, "pipe:1")
+
+	cmd := exec.Command(t.FFmpegPath, args...)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("failed to get FFmpeg stdout: %w", err)
+	}
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("failed to get FFmpeg stderr: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start FFmpeg: %w", err)
+	}
+
+	// Log FFmpeg errors in background
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := stderr.Read(buf)
+			if n > 0 {
+				log.Printf("FFmpeg: %s", string(buf[:n]))
+			}
+			if err != nil {
+				break
+			}
+		}
+	}()
+
+	// Set response headers
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Transfer-Encoding", "chunked")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// Stream FFmpeg output to client
+	buf := make([]byte, 64*1024)
+	flusher, canFlush := w.(http.Flusher)
+
+	for {
+		n, err := stdout.Read(buf)
+		if n > 0 {
+			_, writeErr := w.Write(buf[:n])
+			if writeErr != nil {
+				log.Printf("Client disconnected: %v", writeErr)
+				cmd.Process.Kill()
+				break
+			}
+			if canFlush {
+				flusher.Flush()
+			}
+		}
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("FFmpeg read error: %v", err)
+			}
+			break
+		}
+	}
+
+	cmd.Wait()
+
+	log.Printf("✅ Transcode complete: %s", filename)
+	return nil
+}
+
+// GetVideoDuration returns the duration of a video file in seconds using FFprobe
+func (t *Transcoder) GetVideoDuration(reader io.Reader) (float64, error) {
+	if t == nil || t.FFprobePath == "" {
+		return 0, fmt.Errorf("FFprobe not available")
+	}
+
+	args := []string{
+		"-v", "error",
+		"-show_entries", "format=duration",
+		"-of", "default=noprint_wrappers=1:nokey=1",
+		"pipe:0",
+	}
+
+	cmd := exec.Command(t.FFprobePath, args...)
+	cmd.Stdin = reader
+
+	output, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("ffprobe error: %w", err)
+	}
+
+	durationStr := strings.TrimSpace(string(output))
+	duration, err := strconv.ParseFloat(durationStr, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid duration output: %s", durationStr)
+	}
+
+	return duration, nil
+}
+
+// GetVideoDurationFromURL returns video duration using URL input
+func (t *Transcoder) GetVideoDurationFromURL(inputURL string) (float64, error) {
+	if t == nil || t.FFprobePath == "" {
+		return 0, fmt.Errorf("FFprobe not available")
+	}
+
+	args := []string{
+		"-v", "error",
+		"-show_entries", "format=duration",
+		"-of", "default=noprint_wrappers=1:nokey=1",
+		inputURL,
+	}
+
+	cmd := exec.Command(t.FFprobePath, args...)
+	output, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("ffprobe error: %w", err)
+	}
+
+	durationStr := strings.TrimSpace(string(output))
+	duration, err := strconv.ParseFloat(durationStr, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid duration output: %s", durationStr)
+	}
+
+	return duration, nil
+}
+
+// ExtractAudioSignature extracts audio activity signature for auto-sync
+func (t *Transcoder) ExtractAudioSignature(inputURL string, startTime float64, durationSec int, sampleRate int, windowMs int, threshold float64) ([]float64, error) {
+	if t == nil {
+		return nil, fmt.Errorf("no transcoder")
+	}
+
+	args := []string{
+		"-ss", fmt.Sprintf("%.2f", startTime),
+		"-i", inputURL,
+		"-t", strconv.Itoa(durationSec),
+		"-ac", "1",
+		"-ar", strconv.Itoa(sampleRate),
+		"-f", "f32le",
+		"-v", "quiet",
+		"pipe:1",
+	}
+
+	cmd := exec.Command(t.FFmpegPath, args...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	// Read floats
+	var samples []float32
+	bytesBuf := make([]byte, 4096)
+
+	for {
+		n, err := stdout.Read(bytesBuf)
+		if n > 0 {
+			for i := 0; i < n; i += 4 {
+				if i+4 > n {
+					break
+				}
+				bits := binary.LittleEndian.Uint32(bytesBuf[i : i+4])
+				f := math.Float32frombits(bits)
+				samples = append(samples, f)
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	cmd.Wait()
+
+	log.Printf("DEBUG: Extracted %d float samples from FFmpeg", len(samples))
+
+	// Normalize Audio
+	maxVal := 0.0
+	for _, s := range samples {
+		abs := math.Abs(float64(s))
+		if abs > maxVal {
+			maxVal = abs
+		}
+	}
+
+	scale := 1.0
+	if maxVal > 0 {
+		scale = 1.0 / maxVal
+	}
+
+	log.Printf("DEBUG: Audio Normalization. Max Peak: %.4f, Scale: %.2f", maxVal, scale)
+
+	// Process VAD
+	samplesPerWin := sampleRate * windowMs / 1000
+	var activity []float64
+
+	for i := 0; i < len(samples); i += samplesPerWin {
+		end := i + samplesPerWin
+		if end > len(samples) {
+			end = len(samples)
+		}
+
+		sum := 0.0
+		for j := i; j < end; j++ {
+			val := float64(samples[j]) * scale
+			sum += val * val
+		}
+		rms := math.Sqrt(sum / float64(end-i))
+
+		if rms > threshold {
+			activity = append(activity, 1.0)
+		} else {
+			activity = append(activity, 0.0)
+		}
+	}
+
+	return activity, nil
+}
