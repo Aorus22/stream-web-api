@@ -3,6 +3,7 @@ package ffmpeg
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -211,6 +212,96 @@ func (t *Transcoder) GetVideoDurationFromURL(inputURL string) (float64, error) {
 	}
 
 	return duration, nil
+}
+
+// SubtitleStream represents an embedded subtitle stream
+type SubtitleStream struct {
+	Index    int    `json:"index"`
+	Language string `json:"language"`
+	Title    string `json:"title"`
+	Codec    string `json:"codec"`
+}
+
+// GetEmbeddedSubtitles returns a list of embedded subtitles
+func (t *Transcoder) GetEmbeddedSubtitles(inputURL string) ([]SubtitleStream, error) {
+	if t == nil || t.FFprobePath == "" {
+		return nil, fmt.Errorf("FFprobe not available")
+	}
+
+	return t.getEmbeddedSubtitlesJSON(inputURL)
+}
+
+func (t *Transcoder) getEmbeddedSubtitlesJSON(inputURL string) ([]SubtitleStream, error) {
+	args := []string{
+		"-v", "error",
+		"-select_streams", "s",
+		"-show_entries", "stream=index,codec_name:stream_tags=language,title",
+		"-of", "json",
+		inputURL,
+	}
+
+	cmd := exec.Command(t.FFprobePath, args...)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+
+	// Define struct for JSON parsing
+	type ProbeResult struct {
+		Streams []struct {
+			Index     int    `json:"index"`
+			CodecName string `json:"codec_name"`
+			Tags      struct {
+				Language string `json:"language"`
+				Title    string `json:"title"`
+			} `json:"tags"`
+		} `json:"streams"`
+	}
+
+	var result ProbeResult
+	if err := json.Unmarshal(output, &result); err != nil {
+		return nil, err
+	}
+
+	var subs []SubtitleStream
+	for _, s := range result.Streams {
+		subs = append(subs, SubtitleStream{
+			Index:    s.Index,
+			Codec:    s.CodecName,
+			Language: s.Tags.Language,
+			Title:    s.Tags.Title,
+		})
+	}
+
+	return subs, nil
+}
+
+// ExtractSubtitle extracts a subtitle stream as SRT
+func (t *Transcoder) ExtractSubtitle(inputURL string, streamIndex int, w io.Writer) error {
+	if t == nil {
+		return fmt.Errorf("transcoder not available")
+	}
+
+	// ffmpeg -i <input> -map 0:<index> -f srt pipe:1
+	args := []string{
+		"-i", inputURL,
+		"-map", fmt.Sprintf("0:%d", streamIndex),
+		"-f", "srt",
+		"-v", "quiet",
+		"pipe:1",
+	}
+
+	cmd := exec.Command(t.FFmpegPath, args...)
+	cmd.Stdout = w
+
+	// Optional: capture stderr
+	// cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to extract subtitle: %w", err)
+	}
+
+	return nil
 }
 
 // ExtractAudioSignature extracts audio activity signature for auto-sync

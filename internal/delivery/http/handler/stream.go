@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 
 	"torrent-stream/internal/infrastructure/ffmpeg"
 	torrentUC "torrent-stream/internal/usecase/torrent"
+	"torrent-stream/pkg/srt"
 )
 
 // StreamHandler handles streaming requests
@@ -232,7 +234,7 @@ func (h *StreamHandler) handleTranscodeInternal(c *gin.Context, infoHash string,
 
 	pieceLength := torrentHandle.Info().PieceLength
 	startPiece := int(file.Offset() / pieceLength)
-	
+
 	// Wait for first 2 pieces (covering start of file)
 	if err := h.service.WaitForPieces(infoHash, startPiece, startPiece+1, 30*time.Second); err != nil {
 		log.Printf("⚠️ Warning: Timeout waiting for pieces, starting FFmpeg anyway: %v", err)
@@ -291,6 +293,86 @@ func (h *StreamHandler) HandleDuration(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"duration": duration})
+}
+
+// HandleStreamSubtitle handles GET /api/stream/:infoHash/:fileIndex/sub/:streamIndex
+func (h *StreamHandler) HandleStreamSubtitle(c *gin.Context) {
+	infoHash := c.Param("infoHash")
+	fileIndex, err := strconv.Atoi(c.Param("fileIndex"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file index"})
+		return
+	}
+	streamIndex, err := strconv.Atoi(c.Param("streamIndex"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid stream index"})
+		return
+	}
+
+	if h.transcoder == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Transcoding not available"})
+		return
+	}
+
+	// Ensure file is ready
+	h.service.GetFileForStreaming(infoHash, fileIndex, 0, 5*1024*1024)
+	time.Sleep(500 * time.Millisecond) // Wait a bit for availability
+
+	inputURL := fmt.Sprintf("http://127.0.0.1:%d/stream/%s/%d?raw=true", h.service.GetPort(), infoHash, fileIndex)
+
+	// Extract SRT
+	var buf bytes.Buffer
+	if err := h.transcoder.ExtractSubtitle(inputURL, streamIndex, &buf); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Parse to JSON cues
+	// We use SRT extraction now, which matches srt.Parse expectation.
+	cues := srt.Parse(buf.Bytes())
+
+	log.Printf("Subtitle extraction: Stream %d, Bytes %d, Cues %d", streamIndex, buf.Len(), len(cues))
+
+	c.JSON(http.StatusOK, cues)
+}
+
+// HandleMediaInfo handles GET /api/metadata/:infoHash/:fileIndex
+func (h *StreamHandler) HandleMediaInfo(c *gin.Context) {
+	infoHash := c.Param("infoHash")
+	fileIndex, err := strconv.Atoi(c.Param("fileIndex"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file index"})
+		return
+	}
+
+	if h.transcoder == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "FFprobe not available"})
+		return
+	}
+
+	// Prioritize first pieces
+	h.service.GetFileForStreaming(infoHash, fileIndex, 0, 5*1024*1024)
+	time.Sleep(500 * time.Millisecond)
+
+	inputURL := fmt.Sprintf("http://127.0.0.1:%d/stream/%s/%d?raw=true", h.service.GetPort(), infoHash, fileIndex)
+
+	// Get Duration
+	duration, err := h.transcoder.GetVideoDurationFromURL(inputURL)
+	if err != nil {
+		log.Printf("Metadata error (duration): %v", err)
+	}
+
+	// Get Subtitles
+	subs, err := h.transcoder.GetEmbeddedSubtitles(inputURL)
+	if err != nil {
+		log.Printf("Metadata error (subtitles): %v", err)
+		subs = []ffmpeg.SubtitleStream{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"duration":  duration,
+		"subtitles": subs,
+	})
 }
 
 // copyWithTimeout streams data with timeout handling
