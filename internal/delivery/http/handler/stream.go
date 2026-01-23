@@ -241,6 +241,13 @@ func (h *StreamHandler) copyWithTimeout(w io.Writer, r io.Reader, length int64) 
 		}
 
 		n, err := r.Read(buf[:maxRead])
+
+		// Prevent tight loop if Read returns 0 bytes and nil error
+		if n == 0 && err == nil {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+
 		if n > 0 {
 			_, writeErr := w.Write(buf[:n])
 			if writeErr != nil {

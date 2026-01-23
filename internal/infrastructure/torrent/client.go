@@ -67,6 +67,27 @@ func (c *Client) AddMagnet(magnetURI string) (*torrent.Torrent, error) {
 		return nil, err
 	}
 
+	infoHash := t.InfoHash().HexString()
+
+	// Check if we already have this torrent
+	c.mu.RLock()
+	_, exists := c.torrents[infoHash]
+	c.mu.RUnlock()
+
+	if exists {
+		// Already managed. Just wait for info if requested (but don't drop on timeout)
+		// We'll give it a shorter timeout since it's already running
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		select {
+		case <-t.GotInfo():
+			return t, nil
+		case <-ctx.Done():
+			// Don't drop, just return error or maybe even the torrent without metadata
+			return nil, fmt.Errorf("timeout waiting for metadata (existing torrent)")
+		}
+	}
+
 	// Wait for metadata with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -75,15 +96,31 @@ func (c *Client) AddMagnet(magnetURI string) (*torrent.Torrent, error) {
 	case <-t.GotInfo():
 		log.Printf("✅ Got metadata for: %s", t.Name())
 	case <-ctx.Done():
-		t.Drop()
+		// Check map again before dropping to prevent race condition
+		c.mu.RLock()
+		_, existsNow := c.torrents[infoHash]
+		c.mu.RUnlock()
+
+		if !existsNow {
+			// Safely drop with panic recovery
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("⚠️ Recovered from panic in t.Drop(): %v", r)
+				}
+			}()
+			t.Drop()
+		}
 		return nil, fmt.Errorf("timeout waiting for metadata")
 	}
 
 	// Store in our map
 	c.mu.Lock()
-	c.torrents[t.InfoHash().HexString()] = &Wrapper{
-		Torrent: t,
-		AddedAt: time.Now(),
+	// Double check
+	if _, exists := c.torrents[infoHash]; !exists {
+		c.torrents[infoHash] = &Wrapper{
+			Torrent: t,
+			AddedAt: time.Now(),
+		}
 	}
 	c.mu.Unlock()
 
@@ -283,7 +320,7 @@ func (c *Client) GetFileReader(infoHashHex string, fileIndex int, start, end int
 
 	reader := file.NewReader()
 	reader.SetReadahead(5 * 1024 * 1024) // 5MB readahead
-	reader.SetResponsive()
+	// reader.SetResponsive() - removed to ensure blocking reads for stable streaming
 
 	if start > 0 {
 		reader.Seek(start, io.SeekStart)
