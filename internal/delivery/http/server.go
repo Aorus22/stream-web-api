@@ -56,6 +56,8 @@ func (s *Server) Start() error {
 	// Torrent routes
 	r.POST("/api/add", s.torrentHandler.HandleAddMagnet)
 	r.GET("/api/torrents", s.torrentHandler.HandleListTorrents)
+	r.GET("/api/search", s.torrentHandler.HandleSearch)
+	r.GET("/api/providers", s.torrentHandler.HandleListProviders)
 	r.GET("/api/stats/:infoHash", s.torrentHandler.HandleStats)
 	r.GET("/api/pieces/:infoHash/:fileIndex", s.torrentHandler.HandlePieceInfo)
 	r.DELETE("/api/remove/:infoHash", s.torrentHandler.HandleRemove)

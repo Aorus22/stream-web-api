@@ -87,3 +87,13 @@ func (s *Service) GetMimeType(filename string) string {
 func (s *Service) GetPort() int {
 	return s.port
 }
+
+// SearchTorrents searches for torrents
+func (s *Service) SearchTorrents(provider, query string, page int) ([]*domain.SearchResult, error) {
+	return infra.Search(provider, query, page)
+}
+
+// GetSearchProviders returns available search providers
+func (s *Service) GetSearchProviders() []string {
+	return infra.GetProviders()
+}

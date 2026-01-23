@@ -93,3 +93,38 @@ func (h *TorrentHandler) HandleRemove(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"message": "OK"})
 }
+
+// HandleSearch handles GET /api/search
+func (h *TorrentHandler) HandleSearch(c *gin.Context) {
+	provider := c.Query("provider")
+	query := c.Query("query")
+	pageStr := c.DefaultQuery("page", "1")
+
+	if provider == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Provider required"})
+		return
+	}
+	if query == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Query required"})
+		return
+	}
+
+	page, err := strconv.Atoi(pageStr)
+	if err != nil || page < 1 {
+		page = 1
+	}
+
+	results, err := h.service.SearchTorrents(provider, query, page)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, results)
+}
+
+// HandleListProviders handles GET /api/providers
+func (h *TorrentHandler) HandleListProviders(c *gin.Context) {
+	providers := h.service.GetSearchProviders()
+	c.JSON(http.StatusOK, providers)
+}
