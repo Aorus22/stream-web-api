@@ -1,6 +1,7 @@
 package ffmpeg
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -48,21 +49,15 @@ func NewTranscoder() *Transcoder {
 }
 
 // TranscodeStream transcodes a video stream to browser-compatible format
-func (t *Transcoder) TranscodeStream(w http.ResponseWriter, r *http.Request, inputURL string, fileSize int64, filename string, startTime float64) error {
+func (t *Transcoder) TranscodeStream(ctx context.Context, w http.ResponseWriter, inputURL string, fileSize int64, filename string, startTime float64) error {
 	if t == nil {
 		return fmt.Errorf("transcoder not available (FFmpeg not found)")
 	}
 
 	// Determine output format based on Accept header or default to MP4
+	// Defaulting to MP4 for stability with explicit context control
 	outputFormat := "mp4"
 	contentType := "video/mp4"
-
-	// Check if client prefers WebM
-	accept := r.Header.Get("Accept")
-	if strings.Contains(accept, "video/webm") {
-		outputFormat = "webm"
-		contentType = "video/webm"
-	}
 
 	log.Printf("🎬 Starting transcode: %s -> %s (start: %.1fs)", filename, outputFormat, startTime)
 
@@ -77,31 +72,22 @@ func (t *Transcoder) TranscodeStream(w http.ResponseWriter, r *http.Request, inp
 		"-v", "warning",
 	)
 
-	if outputFormat == "webm" {
-		args = append(args,
-			"-c:v", "libvpx-vp9",
-			"-crf", "30",
-			"-b:v", "0",
-			"-c:a", "libopus",
-			"-b:a", "128k",
-			"-f", "webm",
-		)
-	} else {
-		args = append(args,
-			"-c:v", "libx264",
-			"-preset", "ultrafast",
-			"-tune", "zerolatency",
-			"-crf", "23",
-			"-c:a", "aac",
-			"-b:a", "128k",
-			"-movflags", "frag_keyframe+empty_moov+faststart",
-			"-f", "mp4",
-		)
-	}
+	// Standard MP4 args
+	args = append(args,
+		"-c:v", "libx264",
+		"-preset", "ultrafast",
+		"-tune", "zerolatency",
+		"-crf", "23",
+		"-c:a", "aac",
+		"-b:a", "128k",
+		"-movflags", "frag_keyframe+empty_moov+faststart",
+		"-f", "mp4",
+	)
 
 	args = append(args, "pipe:1")
 
-	cmd := exec.Command(t.FFmpegPath, args...)
+	// Use CommandContext to allow killing via context
+	cmd := exec.CommandContext(ctx, t.FFmpegPath, args...)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

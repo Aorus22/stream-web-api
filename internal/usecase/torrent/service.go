@@ -2,6 +2,7 @@ package torrent
 
 import (
 	"io"
+	"time"
 
 	"torrent-stream/internal/domain"
 	infra "torrent-stream/internal/infrastructure/torrent"
@@ -55,6 +56,11 @@ func (s *Service) GetFileReader(infoHash string, fileIndex int, start, end int64
 func (s *Service) GetFileForStreaming(infoHash string, fileIndex int, start, end int64) error {
 	_, err := s.client.GetFileForStreaming(infoHash, fileIndex, start, end)
 	return err
+}
+
+// WaitForPieces waits for specific pieces to be ready
+func (s *Service) WaitForPieces(infoHash string, startPiece, endPiece int, timeout time.Duration) error {
+	return s.client.WaitForPieces(infoHash, startPiece, endPiece, timeout)
 }
 
 // GetPieceInfo returns piece information

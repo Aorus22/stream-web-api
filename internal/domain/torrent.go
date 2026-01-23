@@ -4,6 +4,7 @@ package domain
 type Torrent struct {
 	InfoHash      string  `json:"infoHash"`
 	Name          string  `json:"name"`
+	MagnetURI     string  `json:"magnetUri"`
 	TotalLength   int64   `json:"totalLength"`
 	Downloaded    int64   `json:"downloaded"`
 	Progress      float64 `json:"progress"`

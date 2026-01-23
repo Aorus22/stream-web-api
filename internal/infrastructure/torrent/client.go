@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -176,9 +177,10 @@ func (c *Client) GetStats(infoHashHex string, baseURL string, port int) (*domain
 
 	if t.Info() == nil {
 		return &domain.Torrent{
-			InfoHash: infoHashHex,
-			Name:     "Fetching metadata...",
-			Status:   "metadata",
+			InfoHash:  infoHashHex,
+			Name:      "Fetching metadata...",
+			MagnetURI: fmt.Sprintf("magnet:?xt=urn:btih:%s", infoHashHex),
+			Status:    "metadata",
 		}, nil
 	}
 
@@ -197,9 +199,12 @@ func (c *Client) GetStats(infoHashHex string, baseURL string, port int) (*domain
 		progress = float64(totalDownloaded) / float64(t.Info().TotalLength()) * 100
 	}
 
+	magnetURI := fmt.Sprintf("magnet:?xt=urn:btih:%s&dn=%s", infoHashHex, url.QueryEscape(t.Name()))
+
 	return &domain.Torrent{
 		InfoHash:      infoHashHex,
 		Name:          t.Name(),
+		MagnetURI:     magnetURI,
 		TotalLength:   t.Info().TotalLength(),
 		Downloaded:    totalDownloaded,
 		Progress:      progress,

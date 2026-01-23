@@ -64,6 +64,7 @@ func (s *Server) Start() error {
 	r.GET("/stream/:infoHash/:fileIndex", s.streamHandler.HandleStream)
 	r.GET("/transcode/:infoHash/:fileIndex", s.streamHandler.HandleTranscode)
 	r.GET("/api/duration/:infoHash/:fileIndex", s.streamHandler.HandleDuration)
+	r.DELETE("/api/stream/active", s.streamHandler.HandleKillStream)
 
 	// Subtitle routes
 	r.GET("/api/subtitles/search", s.subtitleHandler.HandleSearch)
