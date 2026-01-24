@@ -70,6 +70,7 @@ func (t *Transcoder) TranscodeStream(ctx context.Context, w http.ResponseWriter,
 
 	// optimize probe size for faster startup
 	args = append(args,
+		"-fflags", "+genpts", // FIX: Generate timestamps to prevent A/V desync
 		"-analyzeduration", "20000000",
 		"-probesize", "20000000",
 	)
@@ -87,7 +88,7 @@ func (t *Transcoder) TranscodeStream(ctx context.Context, w http.ResponseWriter,
 		"-c:v", "copy",
 		"-c:a", "aac",
 		"-b:a", "192k",
-		"-af", "aresample=async=1",
+		"-af", "aresample=async=1000:min_comp=0.001", // FIX: Aggressive audio sync
 		"-sn",
 		"-movflags", "frag_keyframe+empty_moov+faststart",
 		"-f", "mp4",
