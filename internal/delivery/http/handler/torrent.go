@@ -94,6 +94,17 @@ func (h *TorrentHandler) HandleRemove(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "OK"})
 }
 
+// HandleRemoveAll handles DELETE /api/torrents/all
+func (h *TorrentHandler) HandleRemoveAll(c *gin.Context) {
+	err := h.service.RemoveAllTorrents()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "All torrents removed"})
+}
+
 // HandleSearch handles GET /api/search
 func (h *TorrentHandler) HandleSearch(c *gin.Context) {
 	provider := c.Query("provider")

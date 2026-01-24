@@ -14,6 +14,7 @@ import (
 	"github.com/anacrolix/torrent"
 
 	"torrent-stream/internal/domain"
+	"torrent-stream/internal/infrastructure/persistence"
 )
 
 // Buffer percentage ahead of playback position (30% of total file)
@@ -25,6 +26,7 @@ type Client struct {
 	torrents map[string]*Wrapper
 	mu       sync.RWMutex
 	cacheDir string
+	repo     *persistence.TorrentRepository
 }
 
 // Wrapper wraps a torrent with additional metadata
@@ -52,14 +54,38 @@ func NewClient(cacheDir string) (*Client, error) {
 		return nil, err
 	}
 
-	log.Printf("🚀 Torrent client initialized")
-	log.Printf("📂 Cache Location: %s (Ensure this has enough space!)", cacheDir)
+	repo, err := persistence.NewTorrentRepository(cacheDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to init persistence: %w", err)
+	}
 
-	return &Client{
+	c := &Client{
 		client:   client,
 		torrents: make(map[string]*Wrapper),
 		cacheDir: cacheDir,
-	}, nil
+		repo:     repo,
+	}
+
+	// Restore active torrents
+	activeTorrents, err := repo.List()
+	if err != nil {
+		log.Printf("⚠️ Failed to load active torrents: %v", err)
+	} else {
+		log.Printf("📂 Loading %d active torrents from DB...", len(activeTorrents))
+		for _, t := range activeTorrents {
+			go func(magnet string) {
+				// Re-add in background to not block startup
+				if _, err := c.AddMagnet(magnet); err != nil {
+					log.Printf("⚠️ Failed to restore torrent %s: %v", magnet, err)
+				}
+			}(t.MagnetURI)
+		}
+	}
+
+	log.Printf("🚀 Torrent client initialized")
+	log.Printf("📂 Cache Location: %s (Ensure this has enough space!)", cacheDir)
+
+	return c, nil
 }
 
 // AddMagnet adds a torrent from a magnet link
@@ -123,6 +149,10 @@ func (c *Client) AddMagnet(magnetURI string) (*torrent.Torrent, error) {
 			Torrent: t,
 			AddedAt: time.Now(),
 		}
+		// Save to DB
+		if err := c.repo.Add(infoHash, magnetURI); err != nil {
+			log.Printf("⚠️ Failed to persist torrent %s: %v", infoHash, err)
+		}
 	}
 	c.mu.Unlock()
 
@@ -160,7 +190,33 @@ func (c *Client) RemoveTorrent(infoHashHex string) error {
 
 	wrapper.Torrent.Drop()
 	delete(c.torrents, infoHashHex)
+
+	// Remove from DB
+	if err := c.repo.Remove(infoHashHex); err != nil {
+		log.Printf("⚠️ Failed to remove torrent from DB %s: %v", infoHashHex, err)
+	}
+
 	log.Printf("🗑️ Removed torrent: %s", infoHashHex)
+	return nil
+}
+
+// RemoveAll removes all torrents
+func (c *Client) RemoveAll() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for hash, wrapper := range c.torrents {
+		wrapper.Torrent.Drop()
+		delete(c.torrents, hash)
+	}
+
+	// Remove from DB
+	if err := c.repo.RemoveAll(); err != nil {
+		log.Printf("⚠️ Failed to clear torrents from DB: %v", err)
+		return err
+	}
+
+	log.Printf("🗑️ Removed all torrents")
 	return nil
 }
 
@@ -588,6 +644,9 @@ func GetMimeType(filename string) string {
 // Close closes the client
 func (c *Client) Close() {
 	c.client.Close()
+	if c.repo != nil {
+		c.repo.Close()
+	}
 }
 
 // Helper for port string

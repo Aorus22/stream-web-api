@@ -47,6 +47,11 @@ func (s *Service) RemoveTorrent(infoHash string) error {
 	return s.client.RemoveTorrent(infoHash)
 }
 
+// RemoveAllTorrents removes all torrents
+func (s *Service) RemoveAllTorrents() error {
+	return s.client.RemoveAll()
+}
+
 // GetFileReader returns a reader for streaming
 func (s *Service) GetFileReader(infoHash string, fileIndex int, start, end int64) (io.ReadSeeker, error) {
 	return s.client.GetFileReader(infoHash, fileIndex, start, end)

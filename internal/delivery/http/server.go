@@ -67,6 +67,7 @@ func (s *Server) Start() error {
 	r.GET("/api/stats/:infoHash", s.torrentHandler.HandleStats)
 	r.GET("/api/pieces/:infoHash/:fileIndex", s.torrentHandler.HandlePieceInfo)
 	r.DELETE("/api/remove/:infoHash", s.torrentHandler.HandleRemove)
+	r.DELETE("/api/torrents/all", s.torrentHandler.HandleRemoveAll)
 
 	// Stream routes
 	r.GET("/stream/:infoHash/:fileIndex", s.streamHandler.HandleStream)
@@ -96,6 +97,7 @@ func (s *Server) Start() error {
 	// Cache routes
 	r.GET("/api/cache", s.cacheHandler.HandleListCachedFiles)
 	r.GET("/api/cache/stats", s.cacheHandler.HandleCacheStats)
+	r.DELETE("/api/cache/all", s.cacheHandler.HandleRemoveAllCache)
 	r.DELETE("/api/cache/:infoHash", s.cacheHandler.HandleDeleteCachedFile)
 
 	addr := fmt.Sprintf(":%d", s.port)

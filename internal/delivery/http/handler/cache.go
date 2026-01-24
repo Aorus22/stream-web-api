@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -116,6 +117,30 @@ func (h *CacheHandler) HandleDeleteCachedFile(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": "Cache deleted"})
+}
+
+// HandleRemoveAllCache handles DELETE /api/cache/all
+func (h *CacheHandler) HandleRemoveAllCache(c *gin.Context) {
+	// Read directory contents
+	entries, err := os.ReadDir(h.cacheDir)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read cache directory"})
+		return
+	}
+
+	for _, entry := range entries {
+		// Skip torrents.db file
+		if entry.Name() == "torrents.db" || entry.Name() == "torrents.db-journal" {
+			continue
+		}
+
+		path := filepath.Join(h.cacheDir, entry.Name())
+		if err := os.RemoveAll(path); err != nil {
+			log.Printf("⚠️ Failed to remove cache item %s: %v", path, err)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "All cache cleared"})
 }
 
 // HandleCacheStats handles GET /api/cache/stats
