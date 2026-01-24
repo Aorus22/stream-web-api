@@ -153,9 +153,10 @@ func (h *StreamHandler) HandleStream(c *gin.Context) {
 		}
 	}
 
-	// Prepare file for streaming
-	if err := h.service.GetFileForStreaming(infoHash, fileIndex, start, end); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to prepare file"})
+	// Update download priorities (Background Manager)
+	// This ensures the "Sliding Window" follows the user's playback position.
+	if err := h.service.UpdatePriorityWindow(infoHash, fileIndex, start); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update priority window"})
 		return
 	}
 
@@ -224,22 +225,15 @@ func (h *StreamHandler) handleTranscodeInternal(c *gin.Context, infoHash string,
 		startTime, _ = strconv.ParseFloat(t, 64)
 	}
 
-	// Prioritize pieces first
-	h.service.GetFileForStreaming(infoHash, fileIndex, 0, 10*1024*1024)
-
-	// CRITICAL FIX: Wait for the first piece (start of file) to be ready!
-	// This prevents FFmpeg from starting before data is available, which causes "loading forever".
-	// We wait up to 30 seconds for the first chunk.
-	log.Printf("⏳ Waiting for initial pieces for transcoding...")
+	// Ensure header is ready before starting FFmpeg to prevent probe failure
+	h.service.EnsureFileHeader(infoHash, fileIndex)
 
 	pieceLength := torrentHandle.Info().PieceLength
 	startPiece := int(file.Offset() / pieceLength)
 
-	// Wait for first 2 pieces (covering start of file)
-	if err := h.service.WaitForPieces(infoHash, startPiece, startPiece+1, 30*time.Second); err != nil {
-		log.Printf("⚠️ Warning: Timeout waiting for pieces, starting FFmpeg anyway: %v", err)
-	} else {
-		log.Printf("✅ Initial pieces ready, launching FFmpeg")
+	// Wait for first piece (header) only
+	if err := h.service.WaitForPieces(infoHash, startPiece, startPiece, 10*time.Second); err != nil {
+		log.Printf("⚠️ Warning: Timeout waiting for header, starting FFmpeg anyway: %v", err)
 	}
 
 	// Construct loopback URL
@@ -279,12 +273,20 @@ func (h *StreamHandler) HandleDuration(c *gin.Context) {
 		return
 	}
 
-	// Prioritize first pieces
-	h.service.GetFileForStreaming(infoHash, fileIndex, 0, 5*1024*1024)
+	// Ensure header is ready for probing
+	h.service.EnsureFileHeader(infoHash, fileIndex)
 
-	time.Sleep(500 * time.Millisecond)
+	// Wait for header (piece 0)
+	// We calculate startPiece manually as we don't have direct access to file struct here easily without looking up again
+	// But service.WaitForPieces needs piece index.
+	// Let's assume piece 0 is startPiece for simplicity or use a helper in service.
+	// Actually, just waiting a bit or relying on loopback blocking is mostly fine for duration.
+	// But to be safe:
+	// h.service.WaitForPieces(infoHash, 0, 0, 10*time.Second)
+	// The problem is we don't know if Piece 0 is the start of THIS file.
+	// But EnsureFileHeader handles priority correctly using file offset.
+	// Let's just trust EnsureFileHeader + Loopback blocking.
 
-	// Get duration via loopback
 	inputURL := fmt.Sprintf("http://127.0.0.1:%d/stream/%s/%d?raw=true", h.service.GetPort(), infoHash, fileIndex)
 	duration, err := h.transcoder.GetVideoDurationFromURL(inputURL)
 	if err != nil {
@@ -314,9 +316,25 @@ func (h *StreamHandler) HandleStreamSubtitle(c *gin.Context) {
 		return
 	}
 
-	// Ensure file is ready
-	h.service.GetFileForStreaming(infoHash, fileIndex, 0, 5*1024*1024)
-	time.Sleep(500 * time.Millisecond) // Wait a bit for availability
+	// Ensure file header is ready
+	h.service.EnsureFileHeader(infoHash, fileIndex)
+
+	// Smart wait for first piece (header/metadata)
+	t := h.service.GetTorrent(infoHash)
+	if t != nil {
+		if torrentHandle, ok := t.(*torrent.Torrent); ok && torrentHandle.Info() != nil {
+			files := torrentHandle.Files()
+			if fileIndex >= 0 && fileIndex < len(files) {
+				file := files[fileIndex]
+				pieceLength := torrentHandle.Info().PieceLength
+				startPiece := int(file.Offset() / pieceLength)
+				// Wait for first piece
+				h.service.WaitForPieces(infoHash, startPiece, startPiece, 10*time.Second)
+			}
+		}
+	} else {
+		time.Sleep(500 * time.Millisecond)
+	}
 
 	inputURL := fmt.Sprintf("http://127.0.0.1:%d/stream/%s/%d?raw=true", h.service.GetPort(), infoHash, fileIndex)
 
@@ -350,9 +368,24 @@ func (h *StreamHandler) HandleMediaInfo(c *gin.Context) {
 		return
 	}
 
-	// Prioritize first pieces
-	h.service.GetFileForStreaming(infoHash, fileIndex, 0, 5*1024*1024)
-	time.Sleep(500 * time.Millisecond)
+	// Prioritize header
+	h.service.EnsureFileHeader(infoHash, fileIndex)
+
+	// Smart wait for first piece
+	t := h.service.GetTorrent(infoHash)
+	if t != nil {
+		if torrentHandle, ok := t.(*torrent.Torrent); ok && torrentHandle.Info() != nil {
+			files := torrentHandle.Files()
+			if fileIndex >= 0 && fileIndex < len(files) {
+				file := files[fileIndex]
+				pieceLength := torrentHandle.Info().PieceLength
+				startPiece := int(file.Offset() / pieceLength)
+				h.service.WaitForPieces(infoHash, startPiece, startPiece, 10*time.Second)
+			}
+		}
+	} else {
+		time.Sleep(500 * time.Millisecond)
+	}
 
 	inputURL := fmt.Sprintf("http://127.0.0.1:%d/stream/%s/%d?raw=true", h.service.GetPort(), infoHash, fileIndex)
 

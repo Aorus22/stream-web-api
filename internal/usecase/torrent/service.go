@@ -52,10 +52,9 @@ func (s *Service) GetFileReader(infoHash string, fileIndex int, start, end int64
 	return s.client.GetFileReader(infoHash, fileIndex, start, end)
 }
 
-// GetFileForStreaming prepares a file for streaming
-func (s *Service) GetFileForStreaming(infoHash string, fileIndex int, start, end int64) error {
-	_, err := s.client.GetFileForStreaming(infoHash, fileIndex, start, end)
-	return err
+// UpdatePriorityWindow updates download priorities based on playback position
+func (s *Service) UpdatePriorityWindow(infoHash string, fileIndex int, startByte int64) error {
+	return s.client.UpdatePriorityWindow(infoHash, fileIndex, startByte)
 }
 
 // WaitForPieces waits for specific pieces to be ready
@@ -81,6 +80,11 @@ func (s *Service) NeedsTranscoding(filename string) bool {
 // GetMimeType returns MIME type for file
 func (s *Service) GetMimeType(filename string) string {
 	return infra.GetMimeType(filename)
+}
+
+// EnsureFileHeader prioritizes file header
+func (s *Service) EnsureFileHeader(infoHash string, fileIndex int) error {
+	return s.client.EnsureFileHeader(infoHash, fileIndex)
 }
 
 // GetPort returns the server port

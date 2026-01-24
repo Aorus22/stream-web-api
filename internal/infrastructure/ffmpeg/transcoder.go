@@ -68,19 +68,26 @@ func (t *Transcoder) TranscodeStream(ctx context.Context, w http.ResponseWriter,
 		args = append(args, "-ss", fmt.Sprintf("%.2f", startTime))
 	}
 
+	// optimize probe size for faster startup
+	args = append(args,
+		"-analyzeduration", "20000000",
+		"-probesize", "20000000",
+	)
+
 	args = append(args,
 		"-i", inputURL,
 		"-v", "warning",
 	)
 
 	// Standard MP4 args
+	// We use -c:v copy to avoid re-encoding overhead (Instant Seek)
+	// We re-encode audio to AAC to ensure browser compatibility
+	// We disable subtitles (-sn) to avoid codec incompatibilities in MP4 container
 	args = append(args,
-		"-c:v", "libx264",
-		"-preset", "ultrafast",
-		"-tune", "zerolatency",
-		"-crf", "23",
+		"-c:v", "copy",
 		"-c:a", "aac",
-		"-b:a", "128k",
+		"-b:a", "192k",
+		"-sn",
 		"-movflags", "frag_keyframe+empty_moov+faststart",
 		"-f", "mp4",
 	)
@@ -234,6 +241,8 @@ func (t *Transcoder) GetEmbeddedSubtitles(inputURL string) ([]SubtitleStream, er
 func (t *Transcoder) getEmbeddedSubtitlesJSON(inputURL string) ([]SubtitleStream, error) {
 	args := []string{
 		"-v", "error",
+		"-analyzeduration", "10000000", // Limit analysis to 10MB/10s
+		"-probesize", "10000000",
 		"-select_streams", "s",
 		"-show_entries", "stream=index,codec_name:stream_tags=language,title",
 		"-of", "json",
@@ -265,15 +274,59 @@ func (t *Transcoder) getEmbeddedSubtitlesJSON(inputURL string) ([]SubtitleStream
 
 	var subs []SubtitleStream
 	for _, s := range result.Streams {
+		title := s.Tags.Title
+
+		// Map common language codes to readable names if title is missing
+		if title == "" && s.Tags.Language != "" {
+			title = getLanguageName(s.Tags.Language)
+		}
+
 		subs = append(subs, SubtitleStream{
 			Index:    s.Index,
 			Codec:    s.CodecName,
 			Language: s.Tags.Language,
-			Title:    s.Tags.Title,
+			Title:    title,
 		})
 	}
 
 	return subs, nil
+}
+
+// getLanguageName maps ISO 639-2/3 codes to readable names
+func getLanguageName(code string) string {
+	code = strings.ToLower(code)
+	langMap := map[string]string{
+		"eng": "English",
+		"jpn": "Japanese",
+		"ind": "Indonesian",
+		"spa": "Spanish",
+		"fre": "French",
+		"fra": "French",
+		"ger": "German",
+		"deu": "German",
+		"ita": "Italian",
+		"rus": "Russian",
+		"por": "Portuguese",
+		"chi": "Chinese",
+		"zho": "Chinese",
+		"kor": "Korean",
+		"ara": "Arabic",
+		"hin": "Hindi",
+		"ben": "Bengali",
+		"tha": "Thai",
+		"vie": "Vietnamese",
+		"may": "Malay",
+		"msa": "Malay",
+		"dut": "Dutch",
+		"nld": "Dutch",
+		"pol": "Polish",
+		"tur": "Turkish",
+	}
+
+	if name, ok := langMap[code]; ok {
+		return name
+	}
+	return strings.ToUpper(code) // Fallback to uppercase code
 }
 
 // ExtractSubtitle extracts a subtitle stream as SRT
@@ -284,8 +337,13 @@ func (t *Transcoder) ExtractSubtitle(inputURL string, streamIndex int, w io.Writ
 
 	// ffmpeg -i <input> -map 0:<index> -f srt pipe:1
 	args := []string{
+		"-analyzeduration", "5000000", // Reduce to 5MB/5s
+		"-probesize", "5000000",
 		"-i", inputURL,
 		"-map", fmt.Sprintf("0:%d", streamIndex),
+		"-vn", // Disable video
+		"-an", // Disable audio
+		"-dn", // Disable data
 		"-f", "srt",
 		"-v", "quiet",
 		"pipe:1",

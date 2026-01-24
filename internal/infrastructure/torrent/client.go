@@ -43,7 +43,7 @@ func NewClient(cacheDir string) (*Client, error) {
 	cfg.DisableUTP = false
 	cfg.DisableTCP = false
 	cfg.NoDHT = false
-	cfg.DisableWebseeds = true
+	cfg.DisableWebseeds = false // Enable Webseeds for faster speed (Stremio-like)
 	cfg.ListenPort = 0
 	cfg.DropDuplicatePeerIds = true
 
@@ -52,7 +52,8 @@ func NewClient(cacheDir string) (*Client, error) {
 		return nil, err
 	}
 
-	log.Printf("🚀 Torrent client initialized (cache: %s)", cacheDir)
+	log.Printf("🚀 Torrent client initialized")
+	log.Printf("📂 Cache Location: %s (Ensure this has enough space!)", cacheDir)
 
 	return &Client{
 		client:   client,
@@ -185,14 +186,14 @@ func (c *Client) GetStats(infoHashHex string, baseURL string, port int) (*domain
 	}
 
 	stats := t.Stats()
-	var totalDownloaded int64 = 0
 	var files []domain.File
 
 	for i, file := range t.Files() {
 		fileStats := c.calculateFileStats(t, file, i, infoHashHex, port)
 		files = append(files, fileStats)
-		totalDownloaded += fileStats.Downloaded
 	}
+
+	totalDownloaded := t.BytesCompleted()
 
 	progress := float64(0)
 	if t.Info().TotalLength() > 0 {
@@ -226,14 +227,60 @@ func (c *Client) calculateFileStats(t *torrent.Torrent, file *torrent.File, inde
 	lastPiece := int((fileEnd - 1) / pieceLength)
 
 	piecesReady := 0
+	var bufferedRanges []domain.Range
+	var currentRange *domain.Range
+
 	for i := firstPiece; i <= lastPiece; i++ {
 		if t.Piece(i).State().Complete {
 			piecesReady++
+
+			// Calculate intersection of piece and file
+			pieceStart := int64(i) * pieceLength
+			pieceEnd := pieceStart + pieceLength
+
+			// Clip to file bounds
+			start := pieceStart
+			if start < fileOffset {
+				start = fileOffset
+			}
+			end := pieceEnd
+			if end > fileEnd {
+				end = fileEnd
+			}
+
+			// Relative to file start
+			relStart := start - fileOffset
+			relEnd := end - fileOffset
+
+			if currentRange == nil {
+				currentRange = &domain.Range{Start: relStart, End: relEnd}
+			} else {
+				// Extend current range if adjacent
+				if relStart <= currentRange.End {
+					if relEnd > currentRange.End {
+						currentRange.End = relEnd
+					}
+				} else {
+					bufferedRanges = append(bufferedRanges, *currentRange)
+					currentRange = &domain.Range{Start: relStart, End: relEnd}
+				}
+			}
+		} else {
+			if currentRange != nil {
+				bufferedRanges = append(bufferedRanges, *currentRange)
+				currentRange = nil
+			}
 		}
+	}
+	if currentRange != nil {
+		bufferedRanges = append(bufferedRanges, *currentRange)
 	}
 
 	piecesTotal := lastPiece - firstPiece + 1
 	downloaded := int64(piecesReady) * pieceLength
+	if downloaded > file.Length() {
+		downloaded = file.Length()
+	}
 
 	progress := float64(0)
 	if file.Length() > 0 {
@@ -244,16 +291,17 @@ func (c *Client) calculateFileStats(t *torrent.Torrent, file *torrent.File, inde
 	}
 
 	return domain.File{
-		Index:       index,
-		Name:        file.DisplayPath(),
-		Length:      file.Length(),
-		Progress:    progress,
-		Downloaded:  downloaded,
-		StreamURL:   fmt.Sprintf("/stream/%s/%d", infoHash, index),
-		PieceStart:  firstPiece,
-		PieceEnd:    lastPiece,
-		PiecesReady: piecesReady,
-		PiecesTotal: piecesTotal,
+		Index:          index,
+		Name:           file.DisplayPath(),
+		Length:         file.Length(),
+		Progress:       progress,
+		Downloaded:     downloaded,
+		StreamURL:      fmt.Sprintf("/stream/%s/%d", infoHash, index),
+		PieceStart:     firstPiece,
+		PieceEnd:       lastPiece,
+		PiecesReady:    piecesReady,
+		PiecesTotal:    piecesTotal,
+		BufferedRanges: bufferedRanges,
 	}
 }
 
@@ -272,60 +320,136 @@ func (c *Client) ListTorrents(port int) []*domain.Torrent {
 	return stats
 }
 
-// GetFileForStreaming returns a file optimized for streaming
-func (c *Client) GetFileForStreaming(infoHashHex string, fileIndex int, startByte, endByte int64) (*torrent.File, error) {
+// UpdatePriorityWindow updates the download window based on playback position
+// It implements a "Sliding Window" strategy:
+// - Back Buffer (50MB): High (Keep for rewind)
+// - Critical (10MB): Now (Play)
+// - Forward Buffer (30%): High (Pre-load)
+// - Outside: None (Stop download)
+func (c *Client) UpdatePriorityWindow(infoHashHex string, fileIndex int, startByte int64) error {
 	t := c.GetTorrent(infoHashHex)
 	if t == nil {
-		return nil, fmt.Errorf("torrent not found")
+		return fmt.Errorf("torrent not found")
 	}
-
 	if t.Info() == nil {
-		return nil, fmt.Errorf("no metadata")
+		return fmt.Errorf("no metadata")
 	}
-
 	files := t.Files()
 	if fileIndex < 0 || fileIndex >= len(files) {
-		return nil, fmt.Errorf("invalid file index")
+		return fmt.Errorf("invalid file index")
 	}
-
 	file := files[fileIndex]
-
-	// Prioritize pieces for this range
 	pieceLength := t.Info().PieceLength
 	fileOffset := file.Offset()
 
-	// Calculate which pieces we need
+	// 1. Calculate Windows
+	const HeaderSize = 10 * 1024 * 1024                       // 10MB Header
+	const BackBufferSize = 50 * 1024 * 1024                   // 50MB Back
+	const CriticalSize = 10 * 1024 * 1024                     // 10MB Critical
+	forwardBufferSize := int64(float64(file.Length()) * 0.30) // 30% Forward
+
+	// Boundaries (Bytes)
+	headerEnd := fileOffset + HeaderSize
+
+	backBufferStart := startByte - BackBufferSize
+	if backBufferStart < 0 {
+		backBufferStart = 0
+	}
+
+	criticalEnd := startByte + CriticalSize
+	if criticalEnd > file.Length() {
+		criticalEnd = file.Length()
+	}
+
+	forwardEnd := startByte + forwardBufferSize
+	if forwardEnd > file.Length() {
+		forwardEnd = file.Length()
+	}
+
+	// Footer
+	const FooterSize = 2 * 1024 * 1024
+	footerStart := file.Length() - FooterSize
+	if footerStart < 0 {
+		footerStart = 0
+	}
+
+	// Boundaries (Pieces)
+	headerEndPiece := int(headerEnd / pieceLength)
+
+	backBufferStartPiece := int((fileOffset + backBufferStart) / pieceLength)
+	// Current play position piece
 	startPiece := int((fileOffset + startByte) / pieceLength)
 
-	// Buffer ahead: only request 30% of file
-	bufferSize := int64(float64(file.Length()) * BufferAheadPercent)
-	bufferEnd := startByte + bufferSize
-	if bufferEnd > file.Length() {
-		bufferEnd = file.Length()
-	}
-	endPiece := int((fileOffset + bufferEnd) / pieceLength)
+	criticalEndPiece := int((fileOffset + criticalEnd) / pieceLength)
+	forwardEndPiece := int((fileOffset + forwardEnd) / pieceLength)
 
-	// Prioritize these pieces
-	for i := startPiece; i <= endPiece; i++ {
-		piece := t.Piece(i)
-		if !piece.State().Complete {
-			piece.SetPriority(torrent.PiecePriorityNow)
+	footerStartPiece := int((fileOffset + footerStart) / pieceLength)
+	fileEndPiece := int((fileOffset + file.Length() - 1) / pieceLength)
+
+	// 2. Apply Priorities (Strict Loop)
+	// We loop through ALL pieces allocated to this file to enforce the window
+	// Note: Ideally we loop only file pieces, assuming standard torrent structure
+
+	fileStartPiece := int(fileOffset / pieceLength)
+	// fileEndPiece is already calculated
+
+	for i := fileStartPiece; i <= fileEndPiece; i++ {
+		// Rule 1: Always Protect Header & Footer
+		if i <= headerEndPiece || i >= footerStartPiece {
+			if !t.Piece(i).State().Complete {
+				t.Piece(i).SetPriority(torrent.PiecePriorityHigh)
+			}
+			continue
 		}
+
+		// Rule 2: Critical Window (Now)
+		if i >= startPiece && i <= criticalEndPiece {
+			if !t.Piece(i).State().Complete {
+				t.Piece(i).SetPriority(torrent.PiecePriorityNow)
+			}
+			continue
+		}
+
+		// Rule 3: Buffer Window (High) - Both Back & Forward
+		// Back Buffer: [backBufferStartPiece ... startPiece-1]
+		// Forward Buffer: [criticalEndPiece+1 ... forwardEndPiece]
+		isBackBuffer := i >= backBufferStartPiece && i < startPiece
+		isForwardBuffer := i > criticalEndPiece && i <= forwardEndPiece
+
+		if isBackBuffer || isForwardBuffer {
+			if !t.Piece(i).State().Complete {
+				t.Piece(i).SetPriority(torrent.PiecePriorityHigh)
+			}
+			continue
+		}
+
+		// Rule 4: Outside Window (None)
+		// Deep Past (< backBufferStartPiece) OR Far Future (> forwardEndPiece)
+		// We strictly turn these OFF to save bandwidth
+		t.Piece(i).SetPriority(torrent.PiecePriorityNone)
 	}
 
-	return file, nil
+	return nil
 }
 
 // GetFileReader returns a reader for a file range
 func (c *Client) GetFileReader(infoHashHex string, fileIndex int, start, end int64) (io.ReadSeeker, error) {
-	file, err := c.GetFileForStreaming(infoHashHex, fileIndex, start, end)
-	if err != nil {
-		return nil, err
+	// Note: We don't call UpdatePriorityWindow here implicitly anymore.
+	// It must be called explicitly by the handler.
+
+	t := c.GetTorrent(infoHashHex)
+	if t == nil {
+		return nil, fmt.Errorf("torrent not found")
 	}
+	files := t.Files()
+	if fileIndex < 0 || fileIndex >= len(files) {
+		return nil, fmt.Errorf("invalid file index")
+	}
+	file := files[fileIndex]
 
 	reader := file.NewReader()
-	reader.SetReadahead(5 * 1024 * 1024) // 5MB readahead
-	// reader.SetResponsive() - removed to ensure blocking reads for stable streaming
+	reader.SetReadahead(1 * 1024 * 1024) // 1MB Readahead
+	reader.SetResponsive()
 
 	if start > 0 {
 		reader.Seek(start, io.SeekStart)

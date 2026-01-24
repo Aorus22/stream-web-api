@@ -16,7 +16,7 @@ import (
 
 func main() {
 	port := 6432
-	cacheDir := "/tmp/torrent-stream-cache"
+	cacheDir := "./torrent_data"
 
 	// Ensure cache directory exists
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {

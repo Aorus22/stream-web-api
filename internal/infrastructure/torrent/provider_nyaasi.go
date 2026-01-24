@@ -1,18 +1,27 @@
 package torrent
 
 import (
+	"encoding/json"
 	"fmt"
-	"strings"
+	"net/url"
 
-	"github.com/PuerkitoBio/goquery"
 	"torrent-stream/internal/domain"
 )
 
-// SearchNyaaSI searches NyaaSI
+// SearchNyaaSI searches NyaaSI via nyaaapi.onrender.com
 func SearchNyaaSI(query string, page int) ([]*domain.SearchResult, error) {
-	url := fmt.Sprintf("https://nyaa.si/?f=0&c=0_0&q=%s&p=%d", query, page)
+	baseURL := "https://nyaaapi.onrender.com/nyaa"
 
-	req, err := PrepareRequest(url)
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, err
+	}
+
+	q := u.Query()
+	q.Set("q", query)
+	u.RawQuery = q.Encode()
+
+	req, err := PrepareRequest(u.String())
 	if err != nil {
 		return nil, err
 	}
@@ -24,40 +33,102 @@ func SearchNyaaSI(query string, page int) ([]*domain.SearchResult, error) {
 	}
 	defer res.Body.Close()
 
-	doc, err := goquery.NewDocumentFromReader(res.Body)
-	if err != nil {
+	if res.StatusCode != 200 {
+		return nil, fmt.Errorf("API returned status: %d", res.StatusCode)
+	}
+
+	// Decode as generic interface
+	var raw interface{}
+	if err := json.NewDecoder(res.Body).Decode(&raw); err != nil {
 		return nil, err
+	}
+
+	var list []interface{}
+
+	// Check if array
+	if l, ok := raw.([]interface{}); ok {
+		list = l
+	} else if obj, ok := raw.(map[string]interface{}); ok {
+		// Check common keys
+		if d, ok := obj["data"].([]interface{}); ok {
+			list = d
+		} else if r, ok := obj["results"].([]interface{}); ok {
+			list = r
+		} else {
+			// Fail-safe: try to return first array found in values
+			found := false
+			for _, v := range obj {
+				if arr, ok := v.([]interface{}); ok {
+					list = arr
+					found = true
+					break
+				}
+			}
+			if !found {
+				keys := make([]string, 0, len(obj))
+				for k := range obj {
+					keys = append(keys, k)
+				}
+				return nil, fmt.Errorf("unknown JSON object structure, keys: %v", keys)
+			}
+		}
+	} else {
+		return nil, fmt.Errorf("unknown JSON structure type")
 	}
 
 	var results []*domain.SearchResult
 
-	doc.Find("tbody tr").Each(func(i int, s *goquery.Selection) {
-		name := strings.TrimSpace(s.Find("td[colspan='2'] a").Not(".comments").Text())
-		if name == "" {
-			// Try finding generic 'a' if structure varies
-			name = strings.TrimSpace(s.Find("td").Eq(1).Find("a").Not(".comments").Text())
+	for _, item := range list {
+		obj, ok := item.(map[string]interface{})
+		if !ok {
+			continue
 		}
 
-		href := s.Find("td[colspan='2'] a").Not(".comments").AttrOr("href", "")
-		if href == "" {
-			href = s.Find("td").Eq(1).Find("a").Not(".comments").AttrOr("href", "")
-		}
-
-		if name != "" {
-			torrent := &domain.SearchResult{
-				Name:         name,
-				Category:     s.Find("a").AttrOr("title", ""),
-				URL:          "https://nyaa.si" + href,
-				Size:         s.Find("td").Eq(3).Text(),
-				DateUploaded: s.Find("td").Eq(4).Text(),
-				Seeders:      s.Find("td").Eq(5).Text(),
-				Leechers:     s.Find("td").Eq(6).Text(),
-				Downloads:    s.Find("td").Eq(7).Text(),
-				Magnet:       s.Find(".text-center a").Next().AttrOr("href", ""),
+		// Helper to try multiple keys
+		getString := func(keys ...string) string {
+			for _, k := range keys {
+				if v, ok := obj[k]; ok && v != nil {
+					s := fmt.Sprintf("%v", v)
+					if s != "" {
+						return s
+					}
+				}
 			}
-			results = append(results, torrent)
+			return ""
 		}
-	})
+
+		// Try to find Name
+		name := getString("name", "title", "subject")
+
+		// Try to find ID
+		idVal := getString("id", "torrent_id", "torrentId")
+
+		// Try to find Date
+		date := getString("date", "created_at", "timestamp", "datetime")
+
+		// Create result
+		torrent := &domain.SearchResult{
+			Name:         name,
+			Category:     getString("category", "category_name"),
+			URL:          fmt.Sprintf("https://nyaa.si/view/%s", idVal),
+			Size:         getString("size", "filesize"),
+			DateUploaded: date,
+			Seeders:      getString("seeders", "seeders_count"),
+			Leechers:     getString("leechers", "leechers_count"),
+			Downloads:    getString("downloads", "completed_count"),
+			Magnet:       getString("magnet", "magnet_link", "magnet_uri"),
+		}
+
+		if name == "" {
+			keys := ""
+			for k := range obj {
+				keys += k + ","
+			}
+			torrent.Name = "DEBUG KEYS: " + keys
+		}
+
+		results = append(results, torrent)
+	}
 
 	return results, nil
 }

@@ -18,14 +18,21 @@ type Torrent struct {
 
 // File represents a single file in a torrent
 type File struct {
-	Index       int     `json:"index"`
-	Name        string  `json:"name"`
-	Length      int64   `json:"length"`
-	Progress    float64 `json:"progress"`
-	Downloaded  int64   `json:"downloaded"`
-	StreamURL   string  `json:"streamUrl"`
-	PieceStart  int     `json:"pieceStart"`
-	PieceEnd    int     `json:"pieceEnd"`
-	PiecesReady int     `json:"piecesReady"`
-	PiecesTotal int     `json:"piecesTotal"`
+	Index          int     `json:"index"`
+	Name           string  `json:"name"`
+	Length         int64   `json:"length"`
+	Progress       float64 `json:"progress"`
+	Downloaded     int64   `json:"downloaded"`
+	StreamURL      string  `json:"streamUrl"`
+	PieceStart     int     `json:"pieceStart"`
+	PieceEnd       int     `json:"pieceEnd"`
+	PiecesReady    int     `json:"piecesReady"`
+	PiecesTotal    int     `json:"piecesTotal"`
+	BufferedRanges []Range `json:"bufferedRanges"`
+}
+
+// Range represents a byte range
+type Range struct {
+	Start int64 `json:"start"`
+	End   int64 `json:"end"`
 }
