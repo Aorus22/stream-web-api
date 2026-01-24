@@ -6,6 +6,7 @@ import (
 
 	"torrent-stream/internal/delivery/http"
 	"torrent-stream/internal/delivery/http/handler"
+	"torrent-stream/internal/infrastructure/cinemeta"
 	"torrent-stream/internal/infrastructure/ffmpeg"
 	"torrent-stream/internal/infrastructure/opensubtitles"
 	"torrent-stream/internal/infrastructure/torrent"
@@ -36,6 +37,7 @@ func main() {
 	}
 
 	opensubtitlesClient := opensubtitles.NewClient()
+	cinemetaClient := cinemeta.NewClient()
 
 	// 2. Use Cases
 	torrentService := torrentUC.NewService(torrentClient, port)
@@ -47,6 +49,8 @@ func main() {
 	streamHandler := handler.NewStreamHandler(torrentService, transcoder)
 	subtitleHandler := handler.NewSubtitleHandler(subtitleService)
 	autosyncHandler := handler.NewAutoSyncHandler(autosyncService, subtitleService, port)
+	catalogHandler := handler.NewCatalogHandler(cinemetaClient)
+	cacheHandler := handler.NewCacheHandler(cacheDir)
 
 	// 4. Server
 	server := http.NewServer(
@@ -55,6 +59,8 @@ func main() {
 		streamHandler,
 		subtitleHandler,
 		autosyncHandler,
+		catalogHandler,
+		cacheHandler,
 	)
 
 	// Start Server

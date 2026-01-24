@@ -18,6 +18,8 @@ type Server struct {
 	streamHandler   *handler.StreamHandler
 	subtitleHandler *handler.SubtitleHandler
 	autosyncHandler *handler.AutoSyncHandler
+	catalogHandler  *handler.CatalogHandler
+	cacheHandler    *handler.CacheHandler
 }
 
 // NewServer creates a new HTTP server
@@ -27,6 +29,8 @@ func NewServer(
 	streamHandler *handler.StreamHandler,
 	subtitleHandler *handler.SubtitleHandler,
 	autosyncHandler *handler.AutoSyncHandler,
+	catalogHandler *handler.CatalogHandler,
+	cacheHandler *handler.CacheHandler,
 ) *Server {
 	return &Server{
 		port:            port,
@@ -34,6 +38,8 @@ func NewServer(
 		streamHandler:   streamHandler,
 		subtitleHandler: subtitleHandler,
 		autosyncHandler: autosyncHandler,
+		catalogHandler:  catalogHandler,
+		cacheHandler:    cacheHandler,
 	}
 }
 
@@ -74,6 +80,23 @@ func (s *Server) Start() error {
 	r.GET("/api/subtitles/search", s.subtitleHandler.HandleSearch)
 	r.GET("/api/subtitles/download", s.subtitleHandler.HandleDownload)
 	r.GET("/api/subtitles/autosync", s.autosyncHandler.HandleAutoSync)
+
+	// Catalog routes (Cinemeta - Stremio's public API)
+	r.GET("/api/catalog/movies", s.catalogHandler.HandleTopMovies)
+	r.GET("/api/catalog/series", s.catalogHandler.HandleTopSeries)
+	r.GET("/api/catalog/movies/top-rated", s.catalogHandler.HandleTopRatedMovies)
+	r.GET("/api/catalog/series/top-rated", s.catalogHandler.HandleTopRatedSeries)
+	r.GET("/api/catalog/movies/genre/:genre", s.catalogHandler.HandleGenreMovies)
+	r.GET("/api/catalog/series/genre/:genre", s.catalogHandler.HandleGenreSeries)
+	r.GET("/api/catalog/movies/search", s.catalogHandler.HandleSearchMovies)
+	r.GET("/api/catalog/series/search", s.catalogHandler.HandleSearchSeries)
+	r.GET("/api/catalog/movie/:id", s.catalogHandler.HandleMovieDetail)
+	r.GET("/api/catalog/series/:id", s.catalogHandler.HandleSeriesDetail)
+
+	// Cache routes
+	r.GET("/api/cache", s.cacheHandler.HandleListCachedFiles)
+	r.GET("/api/cache/stats", s.cacheHandler.HandleCacheStats)
+	r.DELETE("/api/cache/:infoHash", s.cacheHandler.HandleDeleteCachedFile)
 
 	addr := fmt.Sprintf(":%d", s.port)
 	log.Printf("🚀 Server starting on http://0.0.0.0%s", addr)

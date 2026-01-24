@@ -32,3 +32,4 @@ cache/
 # Environment
 .env
 .env.local
+torrent_data
