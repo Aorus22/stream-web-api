@@ -64,13 +64,9 @@ func (t *Transcoder) TranscodeStream(ctx context.Context, w http.ResponseWriter,
 
 	var args []string
 
-	if startTime > 0 {
-		args = append(args, "-ss", fmt.Sprintf("%.2f", startTime))
-	}
-
 	// optimize probe size for faster startup
 	args = append(args,
-		"-fflags", "+genpts", // FIX: Generate timestamps to prevent A/V desync
+		"-fflags", "+genpts+igndts", // FIX: Generate timestamps, ignore dts mismatch
 		"-analyzeduration", "20000000",
 		"-probesize", "20000000",
 	)
@@ -80,15 +76,22 @@ func (t *Transcoder) TranscodeStream(ctx context.Context, w http.ResponseWriter,
 		"-v", "warning",
 	)
 
+	if startTime > 0 {
+		args = append(args, "-ss", fmt.Sprintf("%.2f", startTime)) // SEEK AFTER INPUT for accuracy
+		args = append(args, "-copyts")                             // Preserve original timestamps
+		args = append(args, "-start_at_zero")                      // Start timeline from zero after seek
+	}
+
 	// Standard MP4 args
 	// We use -c:v copy to avoid re-encoding overhead (Instant Seek)
 	// We re-encode audio to AAC to ensure browser compatibility
 	// We disable subtitles (-sn) to avoid codec incompatibilities in MP4 container
 	args = append(args,
 		"-c:v", "copy",
+		"-vsync", "2", // FIX: Pass-through with timestamp correction
 		"-c:a", "aac",
 		"-b:a", "192k",
-		"-af", "aresample=async=1000:min_comp=0.001", // FIX: Aggressive audio sync
+		"-af", "aresample=async=1:first_pts=0", // FIX: Better audio sync
 		"-sn",
 		"-movflags", "frag_keyframe+empty_moov+faststart",
 		"-f", "mp4",
