@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,15 +27,19 @@ import (
 type StreamHandler struct {
 	service      *torrentUC.Service
 	transcoder   *ffmpeg.Transcoder
+	cacheDir     string
 	mu           sync.Mutex
+	semaphore    chan struct{}
 	activeCancel context.CancelFunc
 }
 
 // NewStreamHandler creates a new stream handler
-func NewStreamHandler(service *torrentUC.Service, transcoder *ffmpeg.Transcoder) *StreamHandler {
+func NewStreamHandler(service *torrentUC.Service, transcoder *ffmpeg.Transcoder, cacheDir string) *StreamHandler {
 	return &StreamHandler{
 		service:    service,
 		transcoder: transcoder,
+		cacheDir:   cacheDir,
+		semaphore:  make(chan struct{}, 3), // Limit to 3 concurrent transcodes
 	}
 }
 
@@ -463,5 +470,162 @@ func (h *StreamHandler) copyWithTimeout(w io.Writer, r io.Reader, length int64, 
 
 			time.Sleep(100 * time.Millisecond)
 		}
+	}
+}
+
+// HLS Constants
+const SegmentDuration = 10.0
+
+// HandleHLSMasterPlaylist handles GET /hls/:infoHash/:fileIndex/playlist.m3u8
+func (h *StreamHandler) HandleHLSMasterPlaylist(c *gin.Context) {
+	infoHash := c.Param("infoHash")
+	fileIndex, err := strconv.Atoi(c.Param("fileIndex"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file index"})
+		return
+	}
+
+	if h.transcoder == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Transcoder not available"})
+		return
+	}
+
+	// 1. Ensure file header (for probing)
+	h.service.EnsureFileHeader(infoHash, fileIndex)
+
+	// loopback URL for probing
+	inputURL := fmt.Sprintf("http://127.0.0.1:%d/stream/%s/%d?raw=true", h.service.GetPort(), infoHash, fileIndex)
+
+	// 2. Get Duration
+	duration, err := h.transcoder.GetVideoDurationFromURL(inputURL)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get duration: " + err.Error()})
+		return
+	}
+
+	// 3. Generate Playlist
+	totalSegments := int(math.Ceil(duration / SegmentDuration))
+
+	var playlist strings.Builder
+	playlist.WriteString("#EXTM3U\n")
+	playlist.WriteString("#EXT-X-VERSION:3\n")
+	playlist.WriteString(fmt.Sprintf("#EXT-X-TARGETDURATION:%d\n", int(SegmentDuration)))
+	playlist.WriteString("#EXT-X-MEDIA-SEQUENCE:0\n")
+	playlist.WriteString("#EXT-X-PLAYLIST-TYPE:VOD\n")
+
+	for i := 0; i < totalSegments; i++ {
+		segDur := SegmentDuration
+		if i == totalSegments-1 {
+			segDur = duration - (float64(i) * SegmentDuration)
+		}
+		playlist.WriteString(fmt.Sprintf("#EXTINF:%.6f,\n", segDur))
+		playlist.WriteString(fmt.Sprintf("segment/segment_%d.ts\n", i))
+	}
+
+	playlist.WriteString("#EXT-X-ENDLIST\n")
+
+	c.Header("Content-Type", "application/vnd.apple.mpegurl")
+	c.String(http.StatusOK, playlist.String())
+}
+
+// HandleHLSSegment handles GET /hls/:infoHash/:fileIndex/segment/:segment.ts
+func (h *StreamHandler) HandleHLSSegment(c *gin.Context) {
+	infoHash := c.Param("infoHash")
+	fileIndex, err := strconv.Atoi(c.Param("fileIndex"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file index"})
+		return
+	}
+
+	segmentStr := c.Param("segment")
+	segmentStr = strings.TrimPrefix(segmentStr, "segment_")
+	segmentStr = strings.TrimSuffix(segmentStr, ".ts")
+
+	segmentIndex, err := strconv.Atoi(segmentStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid segment index"})
+		return
+	}
+
+	if h.transcoder == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Transcoder not available"})
+		return
+	}
+
+	startTime := float64(segmentIndex) * SegmentDuration
+
+	// Ensure File Header (Important for seeking via loopback)
+	// h.service.EnsureFileHeader(infoHash, fileIndex)
+	// Actually TranscodeSegment uses direct loopback url which triggers HandleStream, which ensures header?
+	// Yes, but calling it here reduces latency / failures.
+	h.service.EnsureFileHeader(infoHash, fileIndex)
+
+	// Cache Path
+	cacheSubDir := filepath.Join(h.cacheDir, infoHash, fmt.Sprintf("file_%d", fileIndex))
+	if err := os.MkdirAll(cacheSubDir, 0755); err != nil {
+		log.Printf("Failed to create cache dir: %v", err)
+	}
+
+	cachePath := filepath.Join(cacheSubDir, fmt.Sprintf("segment_%d.ts", segmentIndex))
+
+	// Check Cache
+	if info, err := os.Stat(cachePath); err == nil {
+		if info.Size() > 1024 { // Ensure file is at least 1KB
+			log.Printf("📦 Serving cached segment: %s", cachePath)
+			c.Header("Content-Type", "video/mp2t")
+			c.File(cachePath)
+			return
+		}
+		// Found invalid cache file, remove it
+		log.Printf("⚠️ Found invalid cache file (too small), removing: %s", cachePath)
+		os.Remove(cachePath)
+	}
+
+	// Transcode and Cache
+	// Acquire semaphore
+	select {
+	case h.semaphore <- struct{}{}:
+		defer func() { <-h.semaphore }()
+	case <-c.Request.Context().Done():
+		return
+	}
+
+	inputURL := fmt.Sprintf("http://127.0.0.1:%d/stream/%s/%d?raw=true", h.service.GetPort(), infoHash, fileIndex)
+
+	// Create Cache File
+	cacheFile, err := os.Create(cachePath)
+	if err != nil {
+		log.Printf("Failed to create cache file: %v", err)
+		c.Status(http.StatusInternalServerError)
+		return
+	}
+	// Don't close immediately, wait for transcode
+
+	c.Header("Content-Type", "video/mp2t")
+
+	// MultiWriter: Write to Response AND Cache File
+	multiWriter := io.MultiWriter(c.Writer, cacheFile)
+
+	ctx := c.Request.Context()
+
+	// Smart Codec: Get details first
+	videoCodec, audioCodec, err := h.transcoder.GetStreamDetails(inputURL)
+	if err != nil {
+		log.Printf("⚠️ Failed to detect codecs: %v", err)
+		// Proceed with default transcoding (empty codecs will trigger libx264/aac)
+	}
+
+	err = h.transcoder.TranscodeSegment(ctx, multiWriter, inputURL, startTime, SegmentDuration, videoCodec, audioCodec)
+
+	// Close cache file after writing
+	cacheFile.Close()
+
+	if err != nil {
+		log.Printf("❌ Segment transcode failed: %v", err)
+		// Clean up partial file
+		os.Remove(cachePath)
+		// If headers already written (which they are), we can't send JSON error easily.
+		// But Gin/HTTP might have already sent 200.
+		return
 	}
 }

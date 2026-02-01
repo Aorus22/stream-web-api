@@ -1,6 +1,7 @@
 package ffmpeg
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -165,6 +166,124 @@ func (t *Transcoder) TranscodeStream(ctx context.Context, w http.ResponseWriter,
 	cmd.Wait()
 
 	log.Printf("✅ Transcode complete: %s", filename)
+	return nil
+}
+
+// GetStreamDetails returns the video and audio codec names
+func (t *Transcoder) GetStreamDetails(inputURL string) (videoCodec, audioCodec string, err error) {
+	if t == nil || t.FFprobePath == "" {
+		return "", "", fmt.Errorf("FFprobe not available")
+	}
+
+	args := []string{
+		"-v", "error",
+		"-show_entries", "stream=codec_name,codec_type",
+		"-of", "json",
+		inputURL,
+	}
+
+	cmd := exec.Command(t.FFprobePath, args...)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", "", fmt.Errorf("ffprobe error: %w", err)
+	}
+
+	type ProbeStream struct {
+		CodecName string `json:"codec_name"`
+		CodecType string `json:"codec_type"`
+	}
+	type ProbeResult struct {
+		Streams []ProbeStream `json:"streams"`
+	}
+
+	var result ProbeResult
+	if err := json.Unmarshal(output, &result); err != nil {
+		return "", "", fmt.Errorf("json parse error: %w", err)
+	}
+
+	for _, s := range result.Streams {
+		if s.CodecType == "video" && videoCodec == "" {
+			videoCodec = s.CodecName
+		}
+		if s.CodecType == "audio" && audioCodec == "" {
+			audioCodec = s.CodecName
+		}
+	}
+
+	return videoCodec, audioCodec, nil
+}
+
+// TranscodeSegment generates a single HLS segment
+func (t *Transcoder) TranscodeSegment(ctx context.Context, w io.Writer, inputURL string, startTime float64, duration float64, srcVideoCodec, srcAudioCodec string) error {
+	if t == nil {
+		return fmt.Errorf("transcoder not available")
+	}
+
+	vCodec := "libx264"
+	aCodec := "aac"
+
+	// Smart Codec: Copy if compatible
+	if srcVideoCodec == "h264" {
+		vCodec = "copy"
+	}
+	if srcAudioCodec == "aac" {
+		aCodec = "copy"
+	}
+
+	// ffmpeg -ss [START] -t [DURATION] -i [INPUT] ...
+	args := []string{
+		"-ss", fmt.Sprintf("%.6f", startTime),
+		"-t", fmt.Sprintf("%.6f", duration),
+		"-i", inputURL,
+		"-map", "0:v:0", // Only map first video stream
+		"-map", "0:a:0", // Only map first audio stream
+		"-c:v", vCodec,
+	}
+
+	// Only add video encoding params if NOT copying
+	if vCodec != "copy" {
+		args = append(args,
+			"-preset", "ultrafast",
+			"-tune", "zerolatency",
+		)
+	}
+
+	args = append(args, "-c:a", aCodec)
+
+	// Only add audio encoding params if NOT copying
+	if aCodec != "copy" {
+		args = append(args,
+			"-ar", "44100",
+			"-ac", "2",
+			"-b:a", "128k",
+		)
+	}
+
+	args = append(args,
+		"-f", "mpegts",
+		"-copyts",
+		"-start_at_zero",
+		"-y",
+		"pipe:1",
+	)
+
+	// Use CommandContext
+	cmd := exec.CommandContext(ctx, t.FFmpegPath, args...)
+
+	// Bind output
+	cmd.Stdout = w
+
+	// Capture stderr for debugging
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	log.Printf("🎞️ Generaing Segment (V:%s, A:%s): Start %.2f, Dur %.2f", vCodec, aCodec, startTime, duration)
+
+	if err := cmd.Run(); err != nil {
+		log.Printf("❌ FFmpeg Error Output:\n%s", stderr.String())
+		return fmt.Errorf("ffmpeg segment error: %w", err)
+	}
+
 	return nil
 }
 

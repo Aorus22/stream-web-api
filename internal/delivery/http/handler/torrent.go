@@ -3,6 +3,7 @@ package handler
 import (
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -138,4 +139,48 @@ func (h *TorrentHandler) HandleSearch(c *gin.Context) {
 func (h *TorrentHandler) HandleListProviders(c *gin.Context) {
 	providers := h.service.GetSearchProviders()
 	c.JSON(http.StatusOK, providers)
+}
+
+// HandleStatsSSE handles GET /api/stats/:infoHash/stream
+func (h *TorrentHandler) HandleStatsSSE(c *gin.Context) {
+	infoHash := c.Param("infoHash")
+	if infoHash == "" {
+		c.Status(http.StatusBadRequest)
+		return
+	}
+
+	// Set headers for SSE
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("Transfer-Encoding", "chunked")
+
+	// Flush the response immediately to ensure the client sees the connection
+	c.Writer.Flush()
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	// Initial send
+	stats, err := h.service.GetStats(infoHash)
+	if err == nil {
+		c.SSEvent("message", stats)
+		c.Writer.Flush()
+	}
+
+	for {
+		select {
+		case <-c.Request.Context().Done():
+			return
+		case <-ticker.C:
+			stats, err := h.service.GetStats(infoHash)
+			if err != nil {
+				// If torrent is gone, maybe stop? For now just keep trying or send empty?
+				// Sending error event could be useful
+				continue
+			}
+			c.SSEvent("message", stats)
+			c.Writer.Flush()
+		}
+	}
 }

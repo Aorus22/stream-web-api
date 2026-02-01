@@ -18,10 +18,14 @@ import (
 func main() {
 	port := 6432
 	cacheDir := "./torrent_data"
+	hlsCacheDir := "./hls_cache"
 
-	// Ensure cache directory exists
+	// Ensure cache directories exist
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
 		log.Fatalf("Failed to create cache directory: %v", err)
+	}
+	if err := os.MkdirAll(hlsCacheDir, 0755); err != nil {
+		log.Fatalf("Failed to create hls cache directory: %v", err)
 	}
 
 	// 1. Infrastructure
@@ -46,7 +50,7 @@ func main() {
 
 	// 3. Handlers
 	torrentHandler := handler.NewTorrentHandler(torrentService)
-	streamHandler := handler.NewStreamHandler(torrentService, transcoder)
+	streamHandler := handler.NewStreamHandler(torrentService, transcoder, hlsCacheDir)
 	subtitleHandler := handler.NewSubtitleHandler(subtitleService)
 	autosyncHandler := handler.NewAutoSyncHandler(autosyncService, subtitleService, port)
 	catalogHandler := handler.NewCatalogHandler(cinemetaClient)

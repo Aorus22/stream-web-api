@@ -68,6 +68,7 @@ func (s *Server) Start() error {
 	r.GET("/api/pieces/:infoHash/:fileIndex", s.torrentHandler.HandlePieceInfo)
 	r.DELETE("/api/remove/:infoHash", s.torrentHandler.HandleRemove)
 	r.DELETE("/api/torrents/all", s.torrentHandler.HandleRemoveAll)
+	r.GET("/api/stats/:infoHash/stream", s.torrentHandler.HandleStatsSSE)
 
 	// Stream routes
 	r.GET("/stream/:infoHash/:fileIndex", s.streamHandler.HandleStream)
@@ -76,6 +77,10 @@ func (s *Server) Start() error {
 	r.GET("/api/metadata/:infoHash/:fileIndex", s.streamHandler.HandleMediaInfo)
 	r.GET("/api/stream/:infoHash/:fileIndex/sub/:streamIndex", s.streamHandler.HandleStreamSubtitle)
 	r.DELETE("/api/stream/active", s.streamHandler.HandleKillStream)
+
+	// HLS routes
+	r.GET("/hls/:infoHash/:fileIndex/playlist.m3u8", s.streamHandler.HandleHLSMasterPlaylist)
+	r.GET("/hls/:infoHash/:fileIndex/segment/:segment", s.streamHandler.HandleHLSSegment)
 
 	// Subtitle routes
 	r.GET("/api/subtitles/search", s.subtitleHandler.HandleSearch)
