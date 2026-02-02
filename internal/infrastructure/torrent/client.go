@@ -601,12 +601,8 @@ func NeedsTranscoding(filename string) bool {
 		ext = ext[idx+1:]
 	}
 
-	// Formats supported natively by browsers
+	// Formats supported natively by browsers (empty to force transcoding for all)
 	supportedFormats := map[string]bool{
-		"mp4":  true,
-		"webm": true,
-		"ogg":  true,
-		"ogv":  true,
 	}
 
 	return !supportedFormats[ext]

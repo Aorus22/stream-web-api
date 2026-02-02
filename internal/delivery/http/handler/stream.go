@@ -97,6 +97,12 @@ func (h *StreamHandler) HandleStream(c *gin.Context) {
 	// Check if raw mode (for transcoder loopback)
 	raw := c.Query("raw") == "true"
 
+	contentType := h.service.GetMimeType(filename)
+	if !raw && strings.HasPrefix(contentType, "video/") {
+		c.Redirect(http.StatusFound, fmt.Sprintf("/hls/%s/%d/playlist.m3u8", infoHash, fileIndex))
+		return
+	}
+
 	// Only apply single-client limit for non-raw (user) requests
 	// Transcoder loopback requests (raw=true) are internal and should not kill the parent stream
 	var streamCtx context.Context
@@ -180,7 +186,7 @@ func (h *StreamHandler) HandleStream(c *gin.Context) {
 
 	// Set headers
 	contentLength := end - start + 1
-	contentType := h.service.GetMimeType(filename)
+	contentType = h.service.GetMimeType(filename)
 
 	c.Header("Content-Type", contentType)
 	c.Header("Accept-Ranges", "bytes")
