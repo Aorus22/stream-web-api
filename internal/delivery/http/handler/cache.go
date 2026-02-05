@@ -12,12 +12,16 @@ import (
 
 // CacheHandler handles cache-related requests
 type CacheHandler struct {
-	cacheDir string
+	cacheDir    string
+	hlsCacheDir string
 }
 
 // NewCacheHandler creates a new cache handler
-func NewCacheHandler(cacheDir string) *CacheHandler {
-	return &CacheHandler{cacheDir: cacheDir}
+func NewCacheHandler(cacheDir string, hlsCacheDir string) *CacheHandler {
+	return &CacheHandler{
+		cacheDir:    cacheDir,
+		hlsCacheDir: hlsCacheDir,
+	}
 }
 
 // CachedFile represents a cached file
@@ -119,28 +123,48 @@ func (h *CacheHandler) HandleDeleteCachedFile(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": "Cache deleted"})
 }
 
-// HandleRemoveAllCache handles DELETE /api/cache/all
-func (h *CacheHandler) HandleRemoveAllCache(c *gin.Context) {
-	// Read directory contents
-	entries, err := os.ReadDir(h.cacheDir)
+// clearDirectory clears all contents of a directory (except the directory itself)
+func (h *CacheHandler) clearDirectory(dir string, skipFiles []string) error {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read cache directory"})
-		return
+		return err
 	}
 
 	for _, entry := range entries {
-		// Skip torrents.db file
-		if entry.Name() == "torrents.db" || entry.Name() == "torrents.db-journal" {
+		// Check if we should skip this file/folder
+		shouldSkip := false
+		for _, skip := range skipFiles {
+			if entry.Name() == skip {
+				shouldSkip = true
+				break
+			}
+		}
+		if shouldSkip {
 			continue
 		}
 
-		path := filepath.Join(h.cacheDir, entry.Name())
+		path := filepath.Join(dir, entry.Name())
 		if err := os.RemoveAll(path); err != nil {
-			log.Printf("⚠️ Failed to remove cache item %s: %v", path, err)
+			log.Printf("⚠️ Failed to remove %s: %v", path, err)
 		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{"success": true, "message": "All cache cleared"})
+	return nil
+}
+
+// HandleRemoveAllCache handles DELETE /api/cache/all
+func (h *CacheHandler) HandleRemoveAllCache(c *gin.Context) {
+	// Clear torrent_data cache (skip torrents.db files)
+	if err := h.clearDirectory(h.cacheDir, []string{"torrents.db", "torrents.db-journal"}); err != nil {
+		log.Printf("⚠️ Failed to clear torrent cache: %v", err)
+	}
+
+	// Clear hls_cache (no files to skip)
+	if err := h.clearDirectory(h.hlsCacheDir, []string{}); err != nil {
+		log.Printf("⚠️ Failed to clear HLS cache: %v", err)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "All cache cleared (torrent data + HLS cache)"})
 }
 
 // HandleCacheStats handles GET /api/cache/stats
