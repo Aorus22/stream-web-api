@@ -223,9 +223,15 @@ func (t *Transcoder) TranscodeSegment(ctx context.Context, w io.Writer, inputURL
 	aCodec := "aac"
 
 	// Smart Codec: Copy if compatible
-	if srcVideoCodec == "h264" {
-		vCodec = "copy"
-	}
+	// DISABLED: HLS segments must start with a Keyframe (IDR).
+	// Copying arbitrary chunks (10s) often results in segments starting with P-frames,
+	// causing the player to freeze (hold previous frame) while audio continues.
+	// We must re-encode to ensure every segment starts with an IDR frame.
+	/*
+		if srcVideoCodec == "h264" {
+			vCodec = "copy"
+		}
+	*/
 	if srcAudioCodec == "aac" {
 		aCodec = "copy"
 	}

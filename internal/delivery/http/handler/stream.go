@@ -560,11 +560,86 @@ func (h *StreamHandler) HandleHLSSegment(c *gin.Context) {
 
 	startTime := float64(segmentIndex) * SegmentDuration
 
-	// Ensure File Header (Important for seeking via loopback)
-	// h.service.EnsureFileHeader(infoHash, fileIndex)
-	// Actually TranscodeSegment uses direct loopback url which triggers HandleStream, which ensures header?
-	// Yes, but calling it here reduces latency / failures.
+	// Get torrent for piece calculation
+	t := h.service.GetTorrent(infoHash)
+	if t == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Torrent not found"})
+		return
+	}
+
+	torrentHandle, ok := t.(*torrent.Torrent)
+	if !ok || torrentHandle.Info() == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Torrent metadata not ready"})
+		return
+	}
+
+	files := torrentHandle.Files()
+	if fileIndex < 0 || fileIndex >= len(files) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file index"})
+		return
+	}
+
+	file := files[fileIndex]
+	pieceLength := torrentHandle.Info().PieceLength
+	fileOffset := file.Offset()
+
+	// Ensure File Header
 	h.service.EnsureFileHeader(infoHash, fileIndex)
+
+	// Calculate pieces needed for this segment
+	// Simple approach: estimate pieces per segment based on file size
+	totalPieces := int((fileOffset + file.Length() - 1) / pieceLength) - int(fileOffset/pieceLength) + 1
+
+	// Estimate: assume ~300 segments for a full movie (300 * 10s = 50 minutes)
+	// Calculate pieces per segment roughly
+	estimatedSegments := 300
+	if totalPieces < 100 {
+		estimatedSegments = totalPieces / 2 // Short video
+	}
+
+	// Pieces per segment = total pieces / estimated segments
+	piecesPerSegment := totalPieces / estimatedSegments
+	if piecesPerSegment < 5 {
+		piecesPerSegment = 5 // Minimum 5 pieces per segment
+	}
+
+	// Calculate start and end piece for this segment
+	startPiece := int(fileOffset/pieceLength) + (segmentIndex * piecesPerSegment)
+	endPiece := startPiece + piecesPerSegment - 1
+
+	// Clamp to actual file bounds
+	lastPieceOfFile := int((fileOffset + file.Length() - 1) / pieceLength)
+	if endPiece > lastPieceOfFile {
+		endPiece = lastPieceOfFile
+	}
+
+	// For first few segments, ensure we have extra buffer (helps with startup)
+	if segmentIndex < 3 {
+		endPiece = startPiece + (piecesPerSegment * 2)
+		if endPiece > lastPieceOfFile {
+			endPiece = lastPieceOfFile
+		}
+	}
+
+	// Wait for pieces with timeout
+	log.Printf("🎯 Segment %d: Waiting for pieces %d-%d (time: %.1fs)", segmentIndex, startPiece, endPiece, startTime)
+	waitStartTime := time.Now()
+	pieceTimeout := 45 * time.Second // Longer timeout for pieces further in the video
+
+	if segmentIndex > 10 {
+		// For segments beyond the first one, use shorter timeout
+		pieceTimeout = 30 * time.Second
+	}
+
+	if err := h.service.WaitForPieces(infoHash, startPiece, endPiece, pieceTimeout); err != nil {
+		waitDuration := time.Since(waitStartTime)
+		log.Printf("⚠️ Segment %d: Pieces not ready after %v (error: %v), transcoding anyway", segmentIndex, waitDuration, err)
+		// Continue anyway - FFmpeg will handle missing pieces by blocking on HTTP read
+		// The transcoding might be slow but it should work
+	} else {
+		waitDuration := time.Since(waitStartTime)
+		log.Printf("✅ Segment %d: Pieces ready in %v", segmentIndex, waitDuration)
+	}
 
 	// Cache Path
 	cacheSubDir := filepath.Join(h.cacheDir, infoHash, fmt.Sprintf("file_%d", fileIndex))
