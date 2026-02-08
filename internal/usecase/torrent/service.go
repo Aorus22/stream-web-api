@@ -1,6 +1,7 @@
 package torrent
 
 import (
+	"context"
 	"io"
 	"time"
 
@@ -57,11 +58,6 @@ func (s *Service) GetFileReader(infoHash string, fileIndex int, start, end int64
 	return s.client.GetFileReader(infoHash, fileIndex, start, end)
 }
 
-// UpdatePriorityWindow updates download priorities based on playback position
-func (s *Service) UpdatePriorityWindow(infoHash string, fileIndex int, startByte int64) error {
-	return s.client.UpdatePriorityWindow(infoHash, fileIndex, startByte)
-}
-
 // WaitForPieces waits for specific pieces to be ready
 func (s *Service) WaitForPieces(infoHash string, startPiece, endPiece int, timeout time.Duration) error {
 	return s.client.WaitForPieces(infoHash, startPiece, endPiece, timeout)
@@ -92,6 +88,16 @@ func (s *Service) EnsureFileHeader(infoHash string, fileIndex int) error {
 	return s.client.EnsureFileHeader(infoHash, fileIndex)
 }
 
+// StartFileDownload begins downloading the entire file from piece 0 to end.
+func (s *Service) StartFileDownload(infoHash string, fileIndex int) error {
+	return s.client.StartFileDownload(infoHash, fileIndex)
+}
+
+// SeekFileDownload moves the download pointer to a new position based on timestamp.
+func (s *Service) SeekFileDownload(infoHash string, fileIndex int, timestamp float64, duration float64) error {
+	return s.client.SeekFileDownload(infoHash, fileIndex, timestamp, duration)
+}
+
 // GetPort returns the server port
 func (s *Service) GetPort() int {
 	return s.port
@@ -105,4 +111,51 @@ func (s *Service) SearchTorrents(provider, query string, page int) ([]*domain.Se
 // GetSearchProviders returns available search providers
 func (s *Service) GetSearchProviders() []string {
 	return infra.GetProviders()
+}
+
+// --- Stream management (delegated to client) ---
+
+// AcquireStream registers a new active user stream, killing any previous one.
+// Returns a cancellable context and cancel function. Caller MUST call cancel when done.
+func (s *Service) AcquireStream(parentCtx context.Context, description string) (context.Context, context.CancelFunc) {
+	return s.client.AcquireStream(parentCtx, description)
+}
+
+// KillActiveStream cancels the active user stream. Returns true if one was killed.
+func (s *Service) KillActiveStream() bool {
+	return s.client.KillActiveStream()
+}
+
+// HasActiveStream returns whether there is an active user stream.
+func (s *Service) HasActiveStream() bool {
+	return s.client.HasActiveStream()
+}
+
+// TorrentCount returns the number of managed torrents.
+func (s *Service) TorrentCount() int {
+	return s.client.TorrentCount()
+}
+
+// --- Playback state tracking (delegated to client) ---
+
+// UpdatePlayback updates the current playback position.
+// Detects seeks and auto-triggers piece re-prioritization + registered callbacks.
+// Returns true if a seek was detected.
+func (s *Service) UpdatePlayback(infoHash string, fileIndex int, timestamp float64, duration float64, segmentIdx int) bool {
+	return s.client.UpdatePlayback(infoHash, fileIndex, timestamp, duration, segmentIdx)
+}
+
+// GetPlaybackState returns a snapshot of the current playback state.
+func (s *Service) GetPlaybackState() infra.PlaybackState {
+	return s.client.GetPlaybackState()
+}
+
+// UpdatePlaybackDuration sets the video duration after it becomes known.
+func (s *Service) UpdatePlaybackDuration(infoHash string, fileIndex int, duration float64) {
+	s.client.UpdatePlaybackDuration(infoHash, fileIndex, duration)
+}
+
+// OnSeek registers a callback that fires when a seek event is detected.
+func (s *Service) OnSeek(cb infra.SeekCallback) {
+	s.client.OnSeek(cb)
 }

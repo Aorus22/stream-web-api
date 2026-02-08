@@ -23,34 +23,40 @@ import (
 	"torrent-stream/pkg/srt"
 )
 
-// StreamHandler handles streaming requests
+// StreamHandler handles streaming requests.
+// Uses the shared Transcoder (with built-in FFmpeg pool) and
+// TorrentService (with built-in single-stream management) for all operations.
 type StreamHandler struct {
-	service      *torrentUC.Service
-	transcoder   *ffmpeg.Transcoder
-	cacheDir     string
-	mu           sync.Mutex
-	semaphore    chan struct{}
-	activeCancel context.CancelFunc
+	service    *torrentUC.Service
+	transcoder *ffmpeg.Transcoder
+	cacheDir   string
+
+	// cachedDurations stores known video durations keyed by "infoHash/fileIndex".
+	// This is populated lazily when HandleHLSMasterPlaylist probes duration.
+	durationMu      sync.RWMutex
+	cachedDurations map[string]float64
 }
 
 // NewStreamHandler creates a new stream handler
 func NewStreamHandler(service *torrentUC.Service, transcoder *ffmpeg.Transcoder, cacheDir string) *StreamHandler {
-	return &StreamHandler{
-		service:    service,
-		transcoder: transcoder,
-		cacheDir:   cacheDir,
-		semaphore:  make(chan struct{}, 3), // Limit to 3 concurrent transcodes
+	h := &StreamHandler{
+		service:         service,
+		transcoder:      transcoder,
+		cacheDir:        cacheDir,
+		cachedDurations: make(map[string]float64),
 	}
+
+	// Register seek callback: when user seeks, pre-generate HLS segments ahead
+	service.OnSeek(func(infoHash string, fileIndex int, segmentIdx int, timestamp float64) {
+		h.prefetchSegments(infoHash, fileIndex, segmentIdx)
+	})
+
+	return h
 }
 
 // HandleKillStream handles DELETE /api/stream/active
 func (h *StreamHandler) HandleKillStream(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	if h.activeCancel != nil {
-		h.activeCancel()
-		h.activeCancel = nil
+	if h.service.KillActiveStream() {
 		c.JSON(http.StatusOK, gin.H{"message": "Stream killed"})
 	} else {
 		c.JSON(http.StatusNotFound, gin.H{"error": "No active stream"})
@@ -109,27 +115,11 @@ func (h *StreamHandler) HandleStream(c *gin.Context) {
 	var cancel context.CancelFunc
 
 	if !raw {
-		h.mu.Lock()
-		if h.activeCancel != nil {
-			h.activeCancel() // Kill previous stream
-			log.Println("🔪 Killed previous active stream")
-		}
-		streamCtx, cancel = context.WithCancel(c.Request.Context())
-		h.activeCancel = cancel
-		h.mu.Unlock()
+		// AcquireStream kills any previous active stream and returns a new cancellable context
+		description := fmt.Sprintf("stream %s/%d", infoHash, fileIndex)
+		streamCtx, cancel = h.service.AcquireStream(c.Request.Context(), description)
 
 		defer func() {
-			h.mu.Lock()
-			// Cleanup: Clear h.activeCancel ONLY if it's still pointing to our cancel function.
-			// This prevents us from nil-ing out a NEW stream's cancel function if one replaced us.
-			// Note: Function pointer comparison in Go isn't direct, but since we are locking,
-			// we can rely on the fact that if we were replaced, activeCancel would have been overwritten.
-			// Since we can't easily compare functions, we'll skip the nil check for now and just rely on
-			// the fact that overwriting it is safe because the previous one is already cancelled.
-			//
-			// A safer approach for state tracking would be using IDs, but for this simple case,
-			// just cancelling our own context is sufficient cleanup.
-			h.mu.Unlock()
 			cancel()
 		}()
 	} else {
@@ -164,13 +154,6 @@ func (h *StreamHandler) HandleStream(c *gin.Context) {
 		if end > fileSize-1 {
 			end = fileSize - 1
 		}
-	}
-
-	// Update download priorities (Background Manager)
-	// This ensures the "Sliding Window" follows the user's playback position.
-	if err := h.service.UpdatePriorityWindow(infoHash, fileIndex, start); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update priority window"})
-		return
 	}
 
 	// Get reader
@@ -482,6 +465,111 @@ func (h *StreamHandler) copyWithTimeout(w io.Writer, r io.Reader, length int64, 
 // HLS Constants
 const SegmentDuration = 10.0
 
+// --- Duration cache helpers ---
+
+func (h *StreamHandler) durationKey(infoHash string, fileIndex int) string {
+	return fmt.Sprintf("%s/%d", infoHash, fileIndex)
+}
+
+func (h *StreamHandler) getCachedDuration(infoHash string, fileIndex int) (float64, bool) {
+	h.durationMu.RLock()
+	defer h.durationMu.RUnlock()
+	d, ok := h.cachedDurations[h.durationKey(infoHash, fileIndex)]
+	return d, ok
+}
+
+func (h *StreamHandler) setCachedDuration(infoHash string, fileIndex int, duration float64) {
+	h.durationMu.Lock()
+	defer h.durationMu.Unlock()
+	h.cachedDurations[h.durationKey(infoHash, fileIndex)] = duration
+	// Also inform the playback state tracker so seek byte estimation is accurate
+	h.service.UpdatePlaybackDuration(infoHash, fileIndex, duration)
+}
+
+// --- HLS pre-generation on seek ---
+
+// prefetchSegments generates HLS segments ahead of the given segment index in the background.
+// This is triggered by seek detection — when the user jumps far ahead, we start transcoding
+// the next N segments immediately so they're cached when the player requests them.
+func (h *StreamHandler) prefetchSegments(infoHash string, fileIndex int, fromSegment int) {
+	if h.transcoder == nil {
+		return
+	}
+
+	duration, hasDuration := h.getCachedDuration(infoHash, fileIndex)
+	if !hasDuration {
+		log.Printf("⚠️ Prefetch skipped: duration unknown for %s/%d", infoHash, fileIndex)
+		return
+	}
+
+	totalSegments := int(math.Ceil(duration / SegmentDuration))
+
+	// Pre-generate up to PrefetchSegments segments ahead (skip the one being requested now)
+	for i := 1; i <= 3; i++ {
+		segIdx := fromSegment + i
+		if segIdx >= totalSegments {
+			break
+		}
+
+		// Check if already cached
+		cacheSubDir := filepath.Join(h.cacheDir, infoHash, fmt.Sprintf("file_%d", fileIndex))
+		cachePath := filepath.Join(cacheSubDir, fmt.Sprintf("segment_%d.ts", segIdx))
+
+		if info, err := os.Stat(cachePath); err == nil && info.Size() > 1024 {
+			continue // Already cached, skip
+		}
+
+		go h.generateSegmentInBackground(infoHash, fileIndex, segIdx, cachePath)
+	}
+}
+
+// generateSegmentInBackground transcodes a single segment to the cache file.
+// Runs in a background goroutine — errors are logged, not returned.
+func (h *StreamHandler) generateSegmentInBackground(infoHash string, fileIndex int, segmentIdx int, cachePath string) {
+	startTime := float64(segmentIdx) * SegmentDuration
+
+	log.Printf("🔮 Prefetching segment %d (time: %.1fs) for %s/%d", segmentIdx, startTime, infoHash, fileIndex)
+
+	// Ensure cache dir exists
+	cacheDir := filepath.Dir(cachePath)
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		log.Printf("⚠️ Prefetch: failed to create cache dir: %v", err)
+		return
+	}
+
+	inputURL := fmt.Sprintf("http://127.0.0.1:%d/stream/%s/%d?raw=true", h.service.GetPort(), infoHash, fileIndex)
+
+	// Ensure header pieces are ready
+	h.service.EnsureFileHeader(infoHash, fileIndex)
+
+	// Detect codecs
+	videoCodec, audioCodec, err := h.transcoder.GetStreamDetails(inputURL)
+	if err != nil {
+		log.Printf("⚠️ Prefetch: codec detection failed: %v", err)
+	}
+
+	// Create cache file
+	cacheFile, err := os.Create(cachePath)
+	if err != nil {
+		log.Printf("⚠️ Prefetch: failed to create cache file: %v", err)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	err = h.transcoder.TranscodeSegment(ctx, cacheFile, inputURL, startTime, SegmentDuration, videoCodec, audioCodec)
+	cacheFile.Close()
+
+	if err != nil {
+		log.Printf("⚠️ Prefetch: segment %d transcode failed: %v", segmentIdx, err)
+		os.Remove(cachePath)
+		return
+	}
+
+	log.Printf("✅ Prefetched segment %d for %s/%d", segmentIdx, infoHash, fileIndex)
+}
+
 // HandleHLSMasterPlaylist handles GET /hls/:infoHash/:fileIndex/playlist.m3u8
 func (h *StreamHandler) HandleHLSMasterPlaylist(c *gin.Context) {
 	infoHash := c.Param("infoHash")
@@ -499,6 +587,12 @@ func (h *StreamHandler) HandleHLSMasterPlaylist(c *gin.Context) {
 	// 1. Ensure file header (for probing)
 	h.service.EnsureFileHeader(infoHash, fileIndex)
 
+	// Start downloading the entire file sequentially (background).
+	// Anacrolix/torrent will download pieces in order: 0, 1, 2, ...
+	if err := h.service.StartFileDownload(infoHash, fileIndex); err != nil {
+		log.Printf("⚠️ Failed to start file download: %v", err)
+	}
+
 	// loopback URL for probing
 	inputURL := fmt.Sprintf("http://127.0.0.1:%d/stream/%s/%d?raw=true", h.service.GetPort(), infoHash, fileIndex)
 
@@ -508,6 +602,11 @@ func (h *StreamHandler) HandleHLSMasterPlaylist(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get duration: " + err.Error()})
 		return
 	}
+
+	// Cache duration for use by HandleHLSSegment (playback tracking, piece calculation)
+	h.setCachedDuration(infoHash, fileIndex, duration)
+	// Also notify the service so playback state has the duration
+	h.service.UpdatePlaybackDuration(infoHash, fileIndex, duration)
 
 	// 3. Generate Playlist
 	totalSegments := int(math.Ceil(duration / SegmentDuration))
@@ -560,86 +659,14 @@ func (h *StreamHandler) HandleHLSSegment(c *gin.Context) {
 
 	startTime := float64(segmentIndex) * SegmentDuration
 
-	// Get torrent for piece calculation
-	t := h.service.GetTorrent(infoHash)
-	if t == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Torrent not found"})
-		return
-	}
+	// Report playback position — triggers seek detection, download pointer move, and prefetch callbacks
+	duration, _ := h.getCachedDuration(infoHash, fileIndex)
+	h.service.UpdatePlayback(infoHash, fileIndex, startTime, duration, segmentIndex)
 
-	torrentHandle, ok := t.(*torrent.Torrent)
-	if !ok || torrentHandle.Info() == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Torrent metadata not ready"})
-		return
-	}
-
-	files := torrentHandle.Files()
-	if fileIndex < 0 || fileIndex >= len(files) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file index"})
-		return
-	}
-
-	file := files[fileIndex]
-	pieceLength := torrentHandle.Info().PieceLength
-	fileOffset := file.Offset()
-
-	// Ensure File Header
+	// Ensure file header is available for FFmpeg probing
 	h.service.EnsureFileHeader(infoHash, fileIndex)
 
-	// Calculate pieces needed for this segment
-	// Simple approach: estimate pieces per segment based on file size
-	totalPieces := int((fileOffset + file.Length() - 1) / pieceLength) - int(fileOffset/pieceLength) + 1
-
-	// Estimate: assume ~300 segments for a full movie (300 * 10s = 50 minutes)
-	// Calculate pieces per segment roughly
-	estimatedSegments := 300
-	if totalPieces < 100 {
-		estimatedSegments = totalPieces / 2 // Short video
-	}
-
-	// Pieces per segment = total pieces / estimated segments
-	piecesPerSegment := totalPieces / estimatedSegments
-	if piecesPerSegment < 5 {
-		piecesPerSegment = 5 // Minimum 5 pieces per segment
-	}
-
-	// Calculate start and end piece for this segment
-	startPiece := int(fileOffset/pieceLength) + (segmentIndex * piecesPerSegment)
-	endPiece := startPiece + piecesPerSegment - 1
-
-	// Clamp to actual file bounds
-	lastPieceOfFile := int((fileOffset + file.Length() - 1) / pieceLength)
-	if endPiece > lastPieceOfFile {
-		endPiece = lastPieceOfFile
-	}
-
-	// For first few segments, ensure we have extra buffer (helps with startup)
-	if segmentIndex < 3 {
-		endPiece = startPiece + (piecesPerSegment * 2)
-		if endPiece > lastPieceOfFile {
-			endPiece = lastPieceOfFile
-		}
-	}
-
-	// Wait for pieces with timeout
-	log.Printf("🎯 Segment %d: Waiting for pieces %d-%d (time: %.1fs)", segmentIndex, startPiece, endPiece, startTime)
-	waitStartTime := time.Now()
-	pieceTimeout := 45 * time.Second // Longer timeout for pieces further in the video
-
-	if segmentIndex > 10 {
-		// For segments beyond the first one, use shorter timeout
-		pieceTimeout = 30 * time.Second
-	}
-
-	if err := h.service.WaitForPieces(infoHash, startPiece, endPiece, pieceTimeout); err != nil {
-		waitDuration := time.Since(waitStartTime)
-		log.Printf("⚠️ Segment %d: Pieces not ready after %v (error: %v), transcoding anyway", segmentIndex, waitDuration, err)
-		// Continue anyway - FFmpeg will handle missing pieces by blocking on HTTP read
-		// The transcoding might be slow but it should work
-	} else {
-		waitDuration := time.Since(waitStartTime)
-		log.Printf("✅ Segment %d: Pieces ready in %v", segmentIndex, waitDuration)
-	}
+	log.Printf("🎯 Segment %d: transcoding (time: %.1fs)", segmentIndex, startTime)
 
 	// Cache Path
 	cacheSubDir := filepath.Join(h.cacheDir, infoHash, fmt.Sprintf("file_%d", fileIndex))
@@ -663,13 +690,7 @@ func (h *StreamHandler) HandleHLSSegment(c *gin.Context) {
 	}
 
 	// Transcode and Cache
-	// Acquire semaphore
-	select {
-	case h.semaphore <- struct{}{}:
-		defer func() { <-h.semaphore }()
-	case <-c.Request.Context().Done():
-		return
-	}
+	// Concurrency is managed by the FFmpeg pool (Transcoder.Acquire) — no handler-level semaphore needed.
 
 	inputURL := fmt.Sprintf("http://127.0.0.1:%d/stream/%s/%d?raw=true", h.service.GetPort(), infoHash, fileIndex)
 

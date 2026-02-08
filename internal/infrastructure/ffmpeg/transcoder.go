@@ -16,14 +16,28 @@ import (
 	"sync"
 )
 
-// Transcoder handles real-time video transcoding using FFmpeg
+// MaxFFmpegInstances is the maximum number of concurrent FFmpeg processes allowed.
+// This is designed for single-user usage — 5 slots covers:
+// HLS segment transcoding, subtitle extraction, duration probing, autosync, etc.
+const MaxFFmpegInstances = 5
+
+// Transcoder handles real-time video transcoding using FFmpeg.
+// It manages a pool of at most MaxFFmpegInstances concurrent FFmpeg processes.
+// All callers share this single instance — acquire a slot before launching FFmpeg.
 type Transcoder struct {
 	FFmpegPath  string
 	FFprobePath string
-	mu          sync.Mutex
+
+	// semaphore limits concurrent FFmpeg processes
+	semaphore chan struct{}
+
+	// active tracks the number of currently running FFmpeg processes
+	mu     sync.Mutex
+	active int
 }
 
-// NewTranscoder creates a new transcoder
+// NewTranscoder creates a new transcoder with a bounded process pool.
+// Returns nil if FFmpeg is not found in PATH.
 func NewTranscoder() *Transcoder {
 	ffmpegPath := "ffmpeg"
 	ffprobePath := "ffprobe"
@@ -43,18 +57,65 @@ func NewTranscoder() *Transcoder {
 		ffprobePath = ""
 	}
 
-	log.Printf("✅ FFmpeg found, transcoding enabled")
+	log.Printf("✅ FFmpeg found, transcoding enabled (max %d concurrent processes)", MaxFFmpegInstances)
 	return &Transcoder{
 		FFmpegPath:  ffmpegPath,
 		FFprobePath: ffprobePath,
+		semaphore:   make(chan struct{}, MaxFFmpegInstances),
 	}
 }
 
-// TranscodeStream transcodes a video stream to browser-compatible format
+// Acquire blocks until a FFmpeg slot is available, or ctx is cancelled.
+// Returns a release function that MUST be called when the FFmpeg process finishes.
+func (t *Transcoder) Acquire(ctx context.Context) (release func(), err error) {
+	select {
+	case t.semaphore <- struct{}{}:
+		t.mu.Lock()
+		t.active++
+		count := t.active
+		t.mu.Unlock()
+		log.Printf("🔧 FFmpeg slot acquired (%d/%d active)", count, MaxFFmpegInstances)
+
+		return func() {
+			<-t.semaphore
+			t.mu.Lock()
+			t.active--
+			count := t.active
+			t.mu.Unlock()
+			log.Printf("🔧 FFmpeg slot released (%d/%d active)", count, MaxFFmpegInstances)
+		}, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("context cancelled while waiting for FFmpeg slot: %w", ctx.Err())
+	}
+}
+
+// ActiveCount returns the number of currently running FFmpeg processes.
+func (t *Transcoder) ActiveCount() int {
+	if t == nil {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.active
+}
+
+// MaxInstances returns the maximum concurrent FFmpeg processes allowed.
+func (t *Transcoder) MaxInstances() int {
+	return MaxFFmpegInstances
+}
+
+// TranscodeStream transcodes a video stream to browser-compatible format.
+// Automatically acquires and releases a pool slot.
 func (t *Transcoder) TranscodeStream(ctx context.Context, w http.ResponseWriter, inputURL string, fileSize int64, filename string, startTime float64) error {
 	if t == nil {
 		return fmt.Errorf("transcoder not available (FFmpeg not found)")
 	}
+
+	release, err := t.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to acquire FFmpeg slot: %w", err)
+	}
+	defer release()
 
 	// Determine output format based on Accept header or default to MP4
 	// Defaulting to MP4 for stability with explicit context control
@@ -169,11 +230,18 @@ func (t *Transcoder) TranscodeStream(ctx context.Context, w http.ResponseWriter,
 	return nil
 }
 
-// GetStreamDetails returns the video and audio codec names
+// GetStreamDetails returns the video and audio codec names.
+// Automatically acquires and releases a pool slot.
 func (t *Transcoder) GetStreamDetails(inputURL string) (videoCodec, audioCodec string, err error) {
 	if t == nil || t.FFprobePath == "" {
 		return "", "", fmt.Errorf("FFprobe not available")
 	}
+
+	release, acquireErr := t.Acquire(context.Background())
+	if acquireErr != nil {
+		return "", "", fmt.Errorf("failed to acquire FFmpeg slot: %w", acquireErr)
+	}
+	defer release()
 
 	args := []string{
 		"-v", "error",
@@ -213,11 +281,18 @@ func (t *Transcoder) GetStreamDetails(inputURL string) (videoCodec, audioCodec s
 	return videoCodec, audioCodec, nil
 }
 
-// TranscodeSegment generates a single HLS segment
+// TranscodeSegment generates a single HLS segment.
+// Automatically acquires and releases a pool slot.
 func (t *Transcoder) TranscodeSegment(ctx context.Context, w io.Writer, inputURL string, startTime float64, duration float64, srcVideoCodec, srcAudioCodec string) error {
 	if t == nil {
 		return fmt.Errorf("transcoder not available")
 	}
+
+	release, err := t.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to acquire FFmpeg slot: %w", err)
+	}
+	defer release()
 
 	vCodec := "libx264"
 	aCodec := "aac"
@@ -293,11 +368,18 @@ func (t *Transcoder) TranscodeSegment(ctx context.Context, w io.Writer, inputURL
 	return nil
 }
 
-// GetVideoDuration returns the duration of a video file in seconds using FFprobe
+// GetVideoDuration returns the duration of a video file in seconds using FFprobe.
+// Automatically acquires and releases a pool slot.
 func (t *Transcoder) GetVideoDuration(reader io.Reader) (float64, error) {
 	if t == nil || t.FFprobePath == "" {
 		return 0, fmt.Errorf("FFprobe not available")
 	}
+
+	release, err := t.Acquire(context.Background())
+	if err != nil {
+		return 0, fmt.Errorf("failed to acquire FFmpeg slot: %w", err)
+	}
+	defer release()
 
 	args := []string{
 		"-v", "error",
@@ -323,11 +405,18 @@ func (t *Transcoder) GetVideoDuration(reader io.Reader) (float64, error) {
 	return duration, nil
 }
 
-// GetVideoDurationFromURL returns video duration using URL input
+// GetVideoDurationFromURL returns video duration using URL input.
+// Automatically acquires and releases a pool slot.
 func (t *Transcoder) GetVideoDurationFromURL(inputURL string) (float64, error) {
 	if t == nil || t.FFprobePath == "" {
 		return 0, fmt.Errorf("FFprobe not available")
 	}
+
+	release, err := t.Acquire(context.Background())
+	if err != nil {
+		return 0, fmt.Errorf("failed to acquire FFmpeg slot: %w", err)
+	}
+	defer release()
 
 	args := []string{
 		"-v", "error",
@@ -359,11 +448,18 @@ type SubtitleStream struct {
 	Codec    string `json:"codec"`
 }
 
-// GetEmbeddedSubtitles returns a list of embedded subtitles
+// GetEmbeddedSubtitles returns a list of embedded subtitles.
+// Automatically acquires and releases a pool slot.
 func (t *Transcoder) GetEmbeddedSubtitles(inputURL string) ([]SubtitleStream, error) {
 	if t == nil || t.FFprobePath == "" {
 		return nil, fmt.Errorf("FFprobe not available")
 	}
+
+	release, err := t.Acquire(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire FFmpeg slot: %w", err)
+	}
+	defer release()
 
 	return t.getEmbeddedSubtitlesJSON(inputURL)
 }
@@ -459,11 +555,18 @@ func getLanguageName(code string) string {
 	return strings.ToUpper(code) // Fallback to uppercase code
 }
 
-// ExtractSubtitle extracts a subtitle stream as SRT
+// ExtractSubtitle extracts a subtitle stream as SRT.
+// Automatically acquires and releases a pool slot.
 func (t *Transcoder) ExtractSubtitle(inputURL string, streamIndex int, w io.Writer) error {
 	if t == nil {
 		return fmt.Errorf("transcoder not available")
 	}
+
+	release, err := t.Acquire(context.Background())
+	if err != nil {
+		return fmt.Errorf("failed to acquire FFmpeg slot: %w", err)
+	}
+	defer release()
 
 	// ffmpeg -i <input> -map 0:<index> -f srt pipe:1
 	args := []string{
@@ -492,11 +595,18 @@ func (t *Transcoder) ExtractSubtitle(inputURL string, streamIndex int, w io.Writ
 	return nil
 }
 
-// ExtractAudioSignature extracts audio activity signature for auto-sync
+// ExtractAudioSignature extracts audio activity signature for auto-sync.
+// Automatically acquires and releases a pool slot.
 func (t *Transcoder) ExtractAudioSignature(inputURL string, startTime float64, durationSec int, sampleRate int, windowMs int, threshold float64) ([]float64, error) {
 	if t == nil {
 		return nil, fmt.Errorf("no transcoder")
 	}
+
+	release, err := t.Acquire(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire FFmpeg slot: %w", err)
+	}
+	defer release()
 
 	args := []string{
 		"-ss", fmt.Sprintf("%.2f", startTime),
