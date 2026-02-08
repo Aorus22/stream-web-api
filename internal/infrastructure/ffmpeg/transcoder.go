@@ -307,12 +307,12 @@ func (t *Transcoder) TranscodeSegment(ctx context.Context, w io.Writer, inputURL
 			vCodec = "copy"
 		}
 	*/
-	if srcAudioCodec == "aac" {
-		aCodec = "copy"
-	}
+	// Always re-encode audio (never copy). Copied audio retains original
+	// timestamps while re-encoded video gets new ones, causing A/V desync.
 
-	// ffmpeg -ss [START] -t [DURATION] -i [INPUT] ...
+	// ffmpeg -fflags +genpts+igndts -ss [START] -t [DURATION] -i [INPUT] ...
 	args := []string{
+		"-fflags", "+genpts+igndts", // Fix broken DTS in torrent files
 		"-ss", fmt.Sprintf("%.6f", startTime),
 		"-t", fmt.Sprintf("%.6f", duration),
 		"-i", inputURL,
@@ -329,16 +329,14 @@ func (t *Transcoder) TranscodeSegment(ctx context.Context, w io.Writer, inputURL
 		)
 	}
 
-	args = append(args, "-c:a", aCodec)
-
-	// Only add audio encoding params if NOT copying
-	if aCodec != "copy" {
-		args = append(args,
-			"-ar", "44100",
-			"-ac", "2",
-			"-b:a", "128k",
-		)
-	}
+	args = append(args,
+		"-vsync", "2", // Proper frame timestamp passthrough
+		"-c:a", aCodec,
+		"-ar", "44100",
+		"-ac", "2",
+		"-b:a", "128k",
+		"-af", "aresample=async=1:first_pts=0", // Anchor audio PTS to zero, correct drift
+	)
 
 	args = append(args,
 		"-f", "mpegts",
@@ -358,7 +356,7 @@ func (t *Transcoder) TranscodeSegment(ctx context.Context, w io.Writer, inputURL
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
-	log.Printf("🎞️ Generaing Segment (V:%s, A:%s): Start %.2f, Dur %.2f", vCodec, aCodec, startTime, duration)
+	log.Printf("🎞️ Generating Segment (V:%s, A:%s): Start %.2f, Dur %.2f", vCodec, aCodec, startTime, duration)
 
 	if err := cmd.Run(); err != nil {
 		log.Printf("❌ FFmpeg Error Output:\n%s", stderr.String())

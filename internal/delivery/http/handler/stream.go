@@ -104,33 +104,33 @@ func (h *StreamHandler) HandleStream(c *gin.Context) {
 	raw := c.Query("raw") == "true"
 
 	contentType := h.service.GetMimeType(filename)
+	// For non-raw video requests, serve as fMP4 via TranscodeStream (remux: copy video, re-encode audio)
 	if !raw && strings.HasPrefix(contentType, "video/") {
-		c.Redirect(http.StatusFound, fmt.Sprintf("/hls/%s/%d/playlist.m3u8", infoHash, fileIndex))
-		return
-	}
-
-	// Only apply single-client limit for non-raw (user) requests
-	// Transcoder loopback requests (raw=true) are internal and should not kill the parent stream
-	var streamCtx context.Context
-	var cancel context.CancelFunc
-
-	if !raw {
 		// AcquireStream kills any previous active stream and returns a new cancellable context
 		description := fmt.Sprintf("stream %s/%d", infoHash, fileIndex)
-		streamCtx, cancel = h.service.AcquireStream(c.Request.Context(), description)
+		streamCtx, cancel := h.service.AcquireStream(c.Request.Context(), description)
+		defer cancel()
 
-		defer func() {
-			cancel()
-		}()
-	} else {
-		// For loopback, use request context directly
-		streamCtx = c.Request.Context()
-	}
-
-	// Check if needs transcoding
-	if !raw && h.service.NeedsTranscoding(filename) {
 		h.handleTranscodeInternal(c, infoHash, fileIndex, streamCtx)
 		return
+	}
+
+	// Below this point: either raw=true (loopback for FFmpeg) or non-video files
+	// For loopback, use request context directly (no stream management)
+	streamCtx := c.Request.Context()
+
+	if !raw {
+		// Non-video file (audio, etc.) — apply single-client stream management
+		description := fmt.Sprintf("stream %s/%d", infoHash, fileIndex)
+		var cancel context.CancelFunc
+		streamCtx, cancel = h.service.AcquireStream(c.Request.Context(), description)
+		defer cancel()
+
+		// Check if needs transcoding (audio files with incompatible codecs)
+		if h.service.NeedsTranscoding(filename) {
+			h.handleTranscodeInternal(c, infoHash, fileIndex, streamCtx)
+			return
+		}
 	}
 
 	// Parse range header
