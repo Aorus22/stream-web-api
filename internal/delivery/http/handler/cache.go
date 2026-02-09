@@ -1,26 +1,31 @@
 package handler
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"torrent-stream/internal/usecase/torrent"
 )
 
 // CacheHandler handles cache-related requests
 type CacheHandler struct {
-	cacheDir    string
-	hlsCacheDir string
+	cacheDir       string
+	hlsCacheDir    string
+	torrentService *torrent.Service
 }
 
 // NewCacheHandler creates a new cache handler
-func NewCacheHandler(cacheDir string, hlsCacheDir string) *CacheHandler {
+func NewCacheHandler(cacheDir string, hlsCacheDir string, torrentService *torrent.Service) *CacheHandler {
 	return &CacheHandler{
-		cacheDir:    cacheDir,
-		hlsCacheDir: hlsCacheDir,
+		cacheDir:       cacheDir,
+		hlsCacheDir:    hlsCacheDir,
+		torrentService: torrentService,
 	}
 }
 
@@ -46,9 +51,45 @@ func isVideoFile(name string) bool {
 	return false
 }
 
+// isPossibleInfoHash checks if a string looks like an infoHash (40 hex characters)
+func isPossibleInfoHash(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
 // HandleListCachedFiles handles GET /api/cache
 func (h *CacheHandler) HandleListCachedFiles(c *gin.Context) {
 	var cachedFiles []CachedFile
+
+	// Build a map of torrent names to infoHashes from active torrents
+	torrents := h.torrentService.ListTorrents()
+	nameToInfoHash := make(map[string]string)
+	infoHashToFiles := make(map[string][]map[string]interface{})
+	fileNameToTorrent := make(map[string]map[string]string) // filename -> {infoHash, fileIndex}
+
+	for _, t := range torrents {
+		nameToInfoHash[t.Name] = t.InfoHash
+		infoHashToFiles[t.InfoHash] = make([]map[string]interface{}, 0)
+		for _, f := range t.Files {
+			fileInfo := map[string]interface{}{
+				"name":  f.Name,
+				"index": f.Index,
+			}
+			infoHashToFiles[t.InfoHash] = append(infoHashToFiles[t.InfoHash], fileInfo)
+			// Also build a direct filename lookup for single-file torrents
+			fileNameToTorrent[f.Name] = map[string]string{
+				"infoHash":   t.InfoHash,
+				"fileIndex": fmt.Sprintf("%d", f.Index),
+			}
+		}
+	}
 
 	// Walk through cache directory
 	err := filepath.Walk(h.cacheDir, func(path string, info os.FileInfo, err error) error {
@@ -68,13 +109,73 @@ func (h *CacheHandler) HandleListCachedFiles(c *gin.Context) {
 
 		// Get relative path from cache dir
 		relPath, _ := filepath.Rel(h.cacheDir, path)
-		parts := strings.Split(relPath, string(os.PathSeparator))
+		// Normalize path separators to forward slashes for consistent splitting
+		relPath = filepath.ToSlash(relPath)
+		parts := strings.Split(relPath, "/")
 
-		// Expected structure: <infoHash>/<filename>
-		// The infohash folder contains the downloaded files
-		infoHash := ""
-		if len(parts) >= 1 {
-			infoHash = parts[0]
+		// Expected structures:
+		// - <torrent_name>/<filename> (multi-file torrent - common case)
+		// - <infoHash>/<filename> (single-file or special case)
+		// - <filename> (single-file torrent at root level)
+		var infoHash string
+		var fileIndex int
+
+		fileName := info.Name()
+
+		if len(parts) >= 2 {
+			// Has subfolder structure: <folder>/<filename>
+			folderName := parts[0]
+
+			// 1. Check if folder name looks like an infoHash (40 hex chars)
+			if isPossibleInfoHash(folderName) {
+				infoHash = folderName
+				// Try to find file index from active torrents
+				if files, ok := infoHashToFiles[infoHash]; ok {
+					for _, f := range files {
+						if fName, ok := f["name"].(string); ok && fName == fileName {
+							if idx, ok := f["index"].(int); ok {
+								fileIndex = idx
+							}
+							break
+						}
+					}
+				}
+			} else
+			// 2. Try to match folder name against torrent names
+			if hash, ok := nameToInfoHash[folderName]; ok {
+				infoHash = hash
+				// Try to find the file index by matching file name
+				if files, ok := infoHashToFiles[hash]; ok {
+					for _, f := range files {
+						if fName, ok := f["name"].(string); ok && fName == fileName {
+							if idx, ok := f["index"].(int); ok {
+								fileIndex = idx
+							}
+							break
+						}
+					}
+				}
+			} else {
+				// 3. Folder name not found - might be from inactive torrent
+				log.Printf("⚠️ Unknown folder in cache: %s (file: %s)", folderName, fileName)
+				infoHash = ""
+				fileIndex = 0
+			}
+		} else {
+			// File at root level - single-file torrent
+			// Try to match by filename against active torrents
+			if match, ok := fileNameToTorrent[fileName]; ok {
+				infoHash = match["infoHash"]
+				if idxStr := match["fileIndex"]; idxStr != "" {
+					if idx, err := strconv.Atoi(idxStr); err == nil {
+						fileIndex = idx
+					}
+				}
+			} else {
+				log.Printf("⚠️ Unknown file at root level: %s", fileName)
+				infoHash = ""
+				fileIndex = 0
+			}
 		}
 
 		cachedFile := CachedFile{
@@ -82,7 +183,7 @@ func (h *CacheHandler) HandleListCachedFiles(c *gin.Context) {
 			Path:      relPath,
 			Size:      info.Size(),
 			InfoHash:  infoHash,
-			FileIndex: 0, // Default, would need torrent metadata to get actual index
+			FileIndex: fileIndex,
 		}
 
 		cachedFiles = append(cachedFiles, cachedFile)

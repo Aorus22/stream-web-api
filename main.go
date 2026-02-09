@@ -54,7 +54,7 @@ func main() {
 	subtitleHandler := handler.NewSubtitleHandler(subtitleService)
 	autosyncHandler := handler.NewAutoSyncHandler(autosyncService, subtitleService, port)
 	catalogHandler := handler.NewCatalogHandler(cinemetaClient)
-	cacheHandler := handler.NewCacheHandler(cacheDir, hlsCacheDir)
+	cacheHandler := handler.NewCacheHandler(cacheDir, hlsCacheDir, torrentService)
 
 	// 4. Server
 	server := http.NewServer(
