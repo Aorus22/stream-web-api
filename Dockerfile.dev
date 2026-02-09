@@ -1,0 +1,7 @@
+FROM golang:alpine
+
+RUN apk add --no-cache git make
+
+WORKDIR /app
+
+CMD ["sleep", "infinity"]
