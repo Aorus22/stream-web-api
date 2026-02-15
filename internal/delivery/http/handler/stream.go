@@ -731,3 +731,100 @@ func (h *StreamHandler) HandleHLSSegment(c *gin.Context) {
 		return
 	}
 }
+
+// HandleStreamChunk handles GET /stream-chunk/:infoHash/:fileIndex
+// Serves video chunks with cache headers for client-side caching
+func (h *StreamHandler) HandleStreamChunk(c *gin.Context) {
+	infoHash := c.Param("infoHash")
+	fileIndex, err := strconv.Atoi(c.Param("fileIndex"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file index"})
+		return
+	}
+
+	// Parse chunk parameters
+	chunkSize := int64(2 * 1024 * 1024) // 2MB chunks
+	startTime := float64(0)
+	
+	if t := c.Query("t"); t != "" {
+		startTime, _ = strconv.ParseFloat(t, 64)
+	}
+	
+	if size := c.Query("size"); size != "" {
+		if s, err := strconv.ParseInt(size, 10, 64); err == nil && s > 0 && s <= 10*1024*1024 {
+			chunkSize = s // Max 10MB per chunk
+		}
+	}
+
+	// Get torrent and file info
+	t := h.service.GetTorrent(infoHash)
+	if t == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Torrent not found"})
+		return
+	}
+
+	torrentHandle, ok := t.(*torrent.Torrent)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid torrent handle"})
+		return
+	}
+
+	if torrentHandle.Info() == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Torrent metadata not ready"})
+		return
+	}
+
+	files := torrentHandle.Files()
+	if fileIndex < 0 || fileIndex >= len(files) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file index"})
+		return
+	}
+
+	file := files[fileIndex]
+	filename := file.DisplayPath()
+
+	// Ensure header is ready for FFmpeg
+	h.service.EnsureFileHeader(infoHash, fileIndex)
+
+	// Calculate byte offset from time (rough estimation)
+	// For more accurate seeking, we'd need duration and bitrate info
+	duration, hasDuration := h.getCachedDuration(infoHash, fileIndex)
+	var byteOffset int64 = 0
+	if hasDuration && duration > 0 && startTime > 0 {
+		// Estimate byte position based on time percentage
+		byteOffset = int64((startTime / duration) * float64(file.Length()))
+		// Align to chunk boundary
+		byteOffset = (byteOffset / chunkSize) * chunkSize
+	}
+
+	endOffset := byteOffset + chunkSize - 1
+	if endOffset >= file.Length() {
+		endOffset = file.Length() - 1
+	}
+
+	// Set cache headers for client-side caching (10 minutes)
+	c.Header("Cache-Control", "public, max-age=600") // 10 minutes
+	c.Header("ETag", fmt.Sprintf(`"%s-%d-%d"`, infoHash[:8], fileIndex, byteOffset/chunkSize))
+	c.Header("Content-Type", "video/mp4") // fMP4 format
+	c.Header("Accept-Ranges", "bytes")
+	c.Header("Content-Length", strconv.FormatInt(endOffset-byteOffset+1, 10))
+	c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", byteOffset, endOffset, file.Length()))
+
+	// Get reader for the chunk
+	reader, err := h.service.GetFileReader(infoHash, fileIndex, byteOffset, endOffset)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get file reader"})
+		return
+	}
+
+	if closer, ok := reader.(io.Closer); ok {
+		defer closer.Close()
+	}
+
+	c.Status(http.StatusPartialContent)
+
+	log.Printf("📦 Streaming chunk %s [%d-%d] (%d bytes, t=%.1fs)", filename, byteOffset, endOffset, endOffset-byteOffset+1, startTime)
+
+	// Stream the chunk
+	h.copyWithTimeout(c.Writer, reader, endOffset-byteOffset+1, c.Request.Context())
+}
