@@ -19,6 +19,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"torrent-stream/internal/infrastructure/ffmpeg"
+	directUC "torrent-stream/internal/usecase/direct"
 	torrentUC "torrent-stream/internal/usecase/torrent"
 	"torrent-stream/pkg/srt"
 )
@@ -27,9 +28,10 @@ import (
 // Uses the shared Transcoder (with built-in FFmpeg pool) and
 // TorrentService (with built-in single-stream management) for all operations.
 type StreamHandler struct {
-	service    *torrentUC.Service
-	transcoder *ffmpeg.Transcoder
-	cacheDir   string
+	service       *torrentUC.Service
+	directService *directUC.Service
+	transcoder    *ffmpeg.Transcoder
+	cacheDir      string
 
 	// cachedDurations stores known video durations keyed by "infoHash/fileIndex".
 	// This is populated lazily when HandleHLSMasterPlaylist probes duration.
@@ -38,9 +40,10 @@ type StreamHandler struct {
 }
 
 // NewStreamHandler creates a new stream handler
-func NewStreamHandler(service *torrentUC.Service, transcoder *ffmpeg.Transcoder, cacheDir string) *StreamHandler {
+func NewStreamHandler(service *torrentUC.Service, directService *directUC.Service, transcoder *ffmpeg.Transcoder, cacheDir string) *StreamHandler {
 	h := &StreamHandler{
 		service:         service,
+		directService:   directService,
 		transcoder:      transcoder,
 		cacheDir:        cacheDir,
 		cachedDurations: make(map[string]float64),
@@ -52,6 +55,103 @@ func NewStreamHandler(service *torrentUC.Service, transcoder *ffmpeg.Transcoder,
 	})
 
 	return h
+}
+
+// HandleDirectStream handles GET /stream/direct/:id
+func (h *StreamHandler) HandleDirectStream(c *gin.Context) {
+	if h.directService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Direct downloads not available"})
+		return
+	}
+
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid id"})
+		return
+	}
+
+	download, err := h.directService.GetDownload(id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Download not found"})
+		return
+	}
+
+	if download.Status != "completed" {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Download not complete"})
+		return
+	}
+
+	filePath := download.FilePath
+	if filePath == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "File not found"})
+		return
+	}
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "File not found"})
+		return
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to stat file"})
+		return
+	}
+
+	fileSize := info.Size()
+	filename := info.Name()
+	contentType := h.service.GetMimeType(filename)
+
+	rangeHeader := c.GetHeader("Range")
+	var start, end int64 = 0, fileSize - 1
+	isRange := false
+
+	if rangeHeader != "" {
+		isRange = true
+		_, err := fmt.Sscanf(rangeHeader, "bytes=%d-", &start)
+		if err != nil {
+			start = 0
+		}
+		if strings.Contains(rangeHeader, "-") {
+			parts := strings.Split(strings.TrimPrefix(rangeHeader, "bytes="), "-")
+			if len(parts) == 2 && parts[1] != "" {
+				end, _ = strconv.ParseInt(parts[1], 10, 64)
+			}
+		}
+		if end > fileSize-1 {
+			end = fileSize - 1
+		}
+		if start < 0 {
+			start = 0
+		}
+		if start > end {
+			start = 0
+			end = fileSize - 1
+			isRange = false
+		}
+	}
+
+	contentLength := end - start + 1
+
+	c.Header("Content-Type", contentType)
+	c.Header("Accept-Ranges", "bytes")
+	c.Header("Content-Length", fmt.Sprintf("%d", contentLength))
+
+	if isRange {
+		c.Status(http.StatusPartialContent)
+		c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, fileSize))
+	} else {
+		c.Status(http.StatusOK)
+	}
+
+	if _, err := f.Seek(start, io.SeekStart); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to seek"})
+		return
+	}
+
+	_, _ = io.CopyN(c.Writer, f, contentLength)
 }
 
 // HandleKillStream handles DELETE /api/stream/active

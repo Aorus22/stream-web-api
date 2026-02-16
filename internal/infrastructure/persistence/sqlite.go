@@ -31,12 +31,25 @@ func NewTorrentRepository(cacheDir string) (*TorrentRepository, error) {
 		return nil, err
 	}
 
-	// Create table if not exists
+	// Create tables if not exists
 	query := `
 	CREATE TABLE IF NOT EXISTS active_torrents (
 		info_hash TEXT PRIMARY KEY,
 		magnet_uri TEXT NOT NULL,
 		added_at DATETIME
+	);
+
+	CREATE TABLE IF NOT EXISTS direct_downloads (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		url TEXT NOT NULL,
+		filename TEXT NOT NULL,
+		status TEXT NOT NULL,
+		progress REAL DEFAULT 0,
+		downloaded_bytes INTEGER DEFAULT 0,
+		total_bytes INTEGER DEFAULT 0,
+		added_at DATETIME,
+		completed_at DATETIME,
+		file_path TEXT
 	);
 	`
 	if _, err := db.Exec(query); err != nil {

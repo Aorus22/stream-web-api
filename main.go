@@ -3,14 +3,17 @@ package main
 import (
 	"log"
 	"os"
+	"path/filepath"
 
 	"torrent-stream/internal/delivery/http"
 	"torrent-stream/internal/delivery/http/handler"
 	"torrent-stream/internal/infrastructure/cinemeta"
 	"torrent-stream/internal/infrastructure/ffmpeg"
 	"torrent-stream/internal/infrastructure/opensubtitles"
+	"torrent-stream/internal/infrastructure/persistence"
 	"torrent-stream/internal/infrastructure/torrent"
 	autosyncUC "torrent-stream/internal/usecase/autosync"
+	directUC "torrent-stream/internal/usecase/direct"
 	subtitleUC "torrent-stream/internal/usecase/subtitle"
 	torrentUC "torrent-stream/internal/usecase/torrent"
 )
@@ -19,6 +22,7 @@ func main() {
 	port := 6432
 	cacheDir := "./torrent_data"
 	hlsCacheDir := "./hls_cache"
+	directCacheDir := filepath.Join(cacheDir, "direct_downloads")
 
 	// Ensure cache directories exist
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
@@ -26,6 +30,9 @@ func main() {
 	}
 	if err := os.MkdirAll(hlsCacheDir, 0755); err != nil {
 		log.Fatalf("Failed to create hls cache directory: %v", err)
+	}
+	if err := os.MkdirAll(directCacheDir, 0755); err != nil {
+		log.Fatalf("Failed to create direct cache directory: %v", err)
 	}
 
 	// 1. Infrastructure
@@ -47,14 +54,25 @@ func main() {
 	torrentService := torrentUC.NewService(torrentClient, port)
 	subtitleService := subtitleUC.NewService(opensubtitlesClient)
 	autosyncService := autosyncUC.NewService(transcoder)
+	directRepo, err := persistence.NewDirectDownloadRepository(cacheDir)
+	if err != nil {
+		log.Fatalf("Failed to init direct download persistence: %v", err)
+	}
+	defer directRepo.Close()
+
+	directService, err := directUC.NewService(directRepo, directCacheDir)
+	if err != nil {
+		log.Fatalf("Failed to init direct download service: %v", err)
+	}
 
 	// 3. Handlers
 	torrentHandler := handler.NewTorrentHandler(torrentService)
-	streamHandler := handler.NewStreamHandler(torrentService, transcoder, hlsCacheDir)
+	streamHandler := handler.NewStreamHandler(torrentService, directService, transcoder, hlsCacheDir)
 	subtitleHandler := handler.NewSubtitleHandler(subtitleService)
 	autosyncHandler := handler.NewAutoSyncHandler(autosyncService, subtitleService, port)
 	catalogHandler := handler.NewCatalogHandler(cinemetaClient)
-	cacheHandler := handler.NewCacheHandler(cacheDir, hlsCacheDir, torrentService)
+	cacheHandler := handler.NewCacheHandler(cacheDir, directCacheDir, hlsCacheDir, torrentService, directService)
+	directHandler := handler.NewDirectDownloadHandler(directService)
 
 	// 4. Server
 	server := http.NewServer(
@@ -65,6 +83,7 @@ func main() {
 		autosyncHandler,
 		catalogHandler,
 		cacheHandler,
+		directHandler,
 	)
 
 	// Start Server

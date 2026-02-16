@@ -20,6 +20,7 @@ type Server struct {
 	autosyncHandler *handler.AutoSyncHandler
 	catalogHandler  *handler.CatalogHandler
 	cacheHandler    *handler.CacheHandler
+	directHandler   *handler.DirectDownloadHandler
 }
 
 // NewServer creates a new HTTP server
@@ -31,6 +32,7 @@ func NewServer(
 	autosyncHandler *handler.AutoSyncHandler,
 	catalogHandler *handler.CatalogHandler,
 	cacheHandler *handler.CacheHandler,
+	directHandler *handler.DirectDownloadHandler,
 ) *Server {
 	return &Server{
 		port:            port,
@@ -40,6 +42,7 @@ func NewServer(
 		autosyncHandler: autosyncHandler,
 		catalogHandler:  catalogHandler,
 		cacheHandler:    cacheHandler,
+		directHandler:   directHandler,
 	}
 }
 
@@ -104,6 +107,17 @@ func (s *Server) Start() error {
 	r.GET("/api/cache/stats", s.cacheHandler.HandleCacheStats)
 	r.DELETE("/api/cache/all", s.cacheHandler.HandleRemoveAllCache)
 	r.DELETE("/api/cache/:infoHash", s.cacheHandler.HandleDeleteCachedFile)
+
+	// Direct download routes
+	r.POST("/api/direct/add", s.directHandler.HandleAddDirectDownload)
+	r.GET("/api/direct", s.directHandler.HandleListDirectDownloads)
+	r.GET("/api/direct/:id", s.directHandler.HandleGetDirectDownload)
+	r.DELETE("/api/direct/:id", s.directHandler.HandleDeleteDirectDownload)
+	r.GET("/api/direct/:id/progress", s.directHandler.HandleDirectDownloadProgress)
+	r.DELETE("/api/direct/all", s.directHandler.HandleDirectDownloadAll)
+
+	// Direct stream route
+	r.GET("/stream/direct/:id", s.streamHandler.HandleDirectStream)
 
 	addr := fmt.Sprintf(":%d", s.port)
 	log.Printf("🚀 Server starting on http://0.0.0.0%s", addr)

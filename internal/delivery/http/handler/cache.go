@@ -9,34 +9,44 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gin-gonic/gin"
+	"torrent-stream/internal/usecase/direct"
 	"torrent-stream/internal/usecase/torrent"
+
+	"github.com/gin-gonic/gin"
 )
 
 // CacheHandler handles cache-related requests
 type CacheHandler struct {
 	cacheDir       string
+	directCacheDir string
 	hlsCacheDir    string
 	torrentService *torrent.Service
+	directService  *direct.Service
 }
 
 // NewCacheHandler creates a new cache handler
-func NewCacheHandler(cacheDir string, hlsCacheDir string, torrentService *torrent.Service) *CacheHandler {
+func NewCacheHandler(cacheDir string, directCacheDir string, hlsCacheDir string, torrentService *torrent.Service, directService *direct.Service) *CacheHandler {
 	return &CacheHandler{
 		cacheDir:       cacheDir,
+		directCacheDir: directCacheDir,
 		hlsCacheDir:    hlsCacheDir,
 		torrentService: torrentService,
+		directService:  directService,
 	}
 }
 
-// CachedFile represents a cached file
-type CachedFile struct {
-	Name      string `json:"name"`
-	Path      string `json:"path"`
-	Size      int64  `json:"size"`
-	InfoHash  string `json:"infoHash"`
-	FileIndex int    `json:"fileIndex"`
-	StreamURL string `json:"streamUrl"`
+type CachedFileWithType struct {
+	Name       string  `json:"name"`
+	Path       string  `json:"path"`
+	Size       int64   `json:"size"`
+	Type       string  `json:"type"` // magnet or direct
+	InfoHash   string  `json:"infoHash,omitempty"`
+	FileIndex  int     `json:"fileIndex,omitempty"`
+	DownloadID int     `json:"downloadId,omitempty"`
+	Progress   float64 `json:"progress,omitempty"`
+	Status     string  `json:"status,omitempty"`
+	StreamURL  string  `json:"streamUrl"`
+	CanPlay    bool    `json:"canPlay"`
 }
 
 // isVideoFile checks if the file is a video file
@@ -66,7 +76,7 @@ func isPossibleInfoHash(s string) bool {
 
 // HandleListCachedFiles handles GET /api/cache
 func (h *CacheHandler) HandleListCachedFiles(c *gin.Context) {
-	var cachedFiles []CachedFile
+	var cachedFiles []CachedFileWithType
 
 	// Build a map of torrent names to infoHashes from active torrents
 	torrents := h.torrentService.ListTorrents()
@@ -85,7 +95,7 @@ func (h *CacheHandler) HandleListCachedFiles(c *gin.Context) {
 			infoHashToFiles[t.InfoHash] = append(infoHashToFiles[t.InfoHash], fileInfo)
 			// Also build a direct filename lookup for single-file torrents
 			fileNameToTorrent[f.Name] = map[string]string{
-				"infoHash":   t.InfoHash,
+				"infoHash":  t.InfoHash,
 				"fileIndex": fmt.Sprintf("%d", f.Index),
 			}
 		}
@@ -99,6 +109,10 @@ func (h *CacheHandler) HandleListCachedFiles(c *gin.Context) {
 
 		// Skip directories
 		if info.IsDir() {
+			// Don't treat direct downloads as magnet cache
+			if h.directCacheDir != "" && filepath.Clean(path) == filepath.Clean(h.directCacheDir) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 
@@ -178,12 +192,22 @@ func (h *CacheHandler) HandleListCachedFiles(c *gin.Context) {
 			}
 		}
 
-		cachedFile := CachedFile{
+		streamURL := ""
+		canPlay := false
+		if infoHash != "" {
+			streamURL = fmt.Sprintf("/stream/%s/%d", infoHash, fileIndex)
+			canPlay = true
+		}
+
+		cachedFile := CachedFileWithType{
 			Name:      info.Name(),
 			Path:      relPath,
 			Size:      info.Size(),
+			Type:      "magnet",
 			InfoHash:  infoHash,
 			FileIndex: fileIndex,
+			StreamURL: streamURL,
+			CanPlay:   canPlay,
 		}
 
 		cachedFiles = append(cachedFiles, cachedFile)
@@ -193,6 +217,106 @@ func (h *CacheHandler) HandleListCachedFiles(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to scan cache directory"})
 		return
+	}
+
+	// Add direct downloads (DB + filesystem)
+	if h.directService != nil && h.directCacheDir != "" {
+		downloads, err := h.directService.ListDownloads()
+		if err == nil {
+			byFilePath := make(map[string]struct {
+				id       int
+				status   string
+				progress float64
+				path     string
+			})
+			for _, dl := range downloads {
+				if dl.FilePath == "" {
+					continue
+				}
+				byFilePath[filepath.Clean(dl.FilePath)] = struct {
+					id       int
+					status   string
+					progress float64
+					path     string
+				}{
+					id:       dl.ID,
+					status:   dl.Status,
+					progress: dl.Progress,
+					path:     dl.FilePath,
+				}
+			}
+
+			// Files on disk
+			_ = filepath.Walk(h.directCacheDir, func(path string, info os.FileInfo, err error) error {
+				if err != nil || info == nil {
+					return nil
+				}
+				if info.IsDir() {
+					return nil
+				}
+				if !isVideoFile(info.Name()) {
+					return nil
+				}
+
+				relPath, _ := filepath.Rel(h.directCacheDir, path)
+				relPath = filepath.ToSlash(relPath)
+
+				rec, ok := byFilePath[filepath.Clean(path)]
+				if !ok {
+					cachedFiles = append(cachedFiles, CachedFileWithType{
+						Name:      info.Name(),
+						Path:      relPath,
+						Size:      info.Size(),
+						Type:      "direct",
+						Status:    "orphan",
+						StreamURL: "",
+						CanPlay:   false,
+					})
+					return nil
+				}
+
+				canPlay := rec.status == "completed"
+				streamURL := ""
+				if rec.id != 0 {
+					streamURL = fmt.Sprintf("/stream/direct/%d", rec.id)
+				}
+
+				cachedFiles = append(cachedFiles, CachedFileWithType{
+					Name:       info.Name(),
+					Path:       relPath,
+					Size:       info.Size(),
+					Type:       "direct",
+					DownloadID: rec.id,
+					Progress:   rec.progress,
+					Status:     rec.status,
+					StreamURL:  streamURL,
+					CanPlay:    canPlay,
+				})
+				return nil
+			})
+
+			// DB records missing on disk
+			for _, dl := range downloads {
+				if dl.FilePath == "" {
+					continue
+				}
+				if _, statErr := os.Stat(dl.FilePath); statErr == nil {
+					continue
+				}
+
+				cachedFiles = append(cachedFiles, CachedFileWithType{
+					Name:       dl.Filename,
+					Path:       dl.FilePath,
+					Size:       0,
+					Type:       "direct",
+					DownloadID: dl.ID,
+					Progress:   dl.Progress,
+					Status:     "missing",
+					StreamURL:  fmt.Sprintf("/stream/direct/%d", dl.ID),
+					CanPlay:    false,
+				})
+			}
+		}
 	}
 
 	c.JSON(http.StatusOK, cachedFiles)
@@ -232,6 +356,11 @@ func (h *CacheHandler) clearDirectory(dir string, skipFiles []string) error {
 	}
 
 	for _, entry := range entries {
+		// Always skip the direct-download cache folder when clearing torrent cache
+		if h.directCacheDir != "" && entry.Name() == filepath.Base(h.directCacheDir) {
+			continue
+		}
+
 		// Check if we should skip this file/folder
 		shouldSkip := false
 		for _, skip := range skipFiles {

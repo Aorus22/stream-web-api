@@ -326,6 +326,8 @@ func (t *Transcoder) TranscodeSegment(ctx context.Context, w io.Writer, inputURL
 		args = append(args,
 			"-preset", "ultrafast",
 			"-tune", "zerolatency",
+			"-sc_threshold", "0", // disable scene-cut detection so forced keyframes are consistent
+			"-force_key_frames", fmt.Sprintf("expr:gte(t,n_forced*%.6f)", duration), // ensure an IDR at each segment boundary
 		)
 	}
 
