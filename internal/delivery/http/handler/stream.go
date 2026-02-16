@@ -18,6 +18,7 @@ import (
 	"github.com/anacrolix/torrent"
 	"github.com/gin-gonic/gin"
 
+	"torrent-stream/internal/domain"
 	"torrent-stream/internal/infrastructure/ffmpeg"
 	directUC "torrent-stream/internal/usecase/direct"
 	torrentUC "torrent-stream/internal/usecase/torrent"
@@ -73,6 +74,11 @@ func (h *StreamHandler) HandleDirectStream(c *gin.Context) {
 	download, err := h.directService.GetDownload(id)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Download not found"})
+		return
+	}
+
+	if download.Status == "on_demand" {
+		h.handleOnDemandDirectProxy(c, download)
 		return
 	}
 
@@ -152,6 +158,191 @@ func (h *StreamHandler) HandleDirectStream(c *gin.Context) {
 	}
 
 	_, _ = io.CopyN(c.Writer, f, contentLength)
+}
+
+func (h *StreamHandler) handleOnDemandDirectProxy(c *gin.Context, download *domain.DirectDownload) {
+	if download.URL == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing url"})
+		return
+	}
+	if download.FilePath == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Missing cache file path"})
+		return
+	}
+
+	rangeHeader := c.GetHeader("Range")
+	start, end, hasRange := parseByteRange(rangeHeader)
+	// Serve from cache when we have a bounded range and it's already cached.
+	if hasRange && end >= start && download.TotalBytes > 0 && h.directService.OnDemandIsCached(download.ID, start, end+1) {
+		h.serveLocalRange(c, download.FilePath, download.Filename, start, end, download.TotalBytes)
+		return
+	}
+
+	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, download.URL, nil)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid url"})
+		return
+	}
+	if rangeHeader != "" {
+		req.Header.Set("Range", rangeHeader)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "Failed to fetch source"})
+		return
+	}
+	defer resp.Body.Close()
+
+	contentType := resp.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = h.service.GetMimeType(download.Filename)
+	}
+
+	if resp.Header.Get("Accept-Ranges") != "" {
+		c.Header("Accept-Ranges", resp.Header.Get("Accept-Ranges"))
+	} else {
+		c.Header("Accept-Ranges", "bytes")
+	}
+	if resp.Header.Get("Content-Range") != "" {
+		c.Header("Content-Range", resp.Header.Get("Content-Range"))
+	}
+	if resp.Header.Get("Content-Length") != "" {
+		c.Header("Content-Length", resp.Header.Get("Content-Length"))
+	}
+	c.Header("Content-Type", contentType)
+	c.Status(resp.StatusCode)
+
+	var (
+		writeStart int64 = 0
+		total      int64 = download.TotalBytes
+	)
+	if resp.StatusCode == http.StatusPartialContent {
+		if cr := resp.Header.Get("Content-Range"); cr != "" {
+			if s, e, t, ok := parseContentRange(cr); ok {
+				writeStart = s
+				if t > 0 {
+					total = t
+				}
+				// If server returned a bounded end, prefer it for cache record.
+				if !hasRange {
+					start, end, hasRange = s, e, true
+				}
+			}
+		}
+	} else if resp.StatusCode == http.StatusOK {
+		writeStart = 0
+		if resp.ContentLength > 0 {
+			total = resp.ContentLength
+		}
+	}
+
+	release := h.directService.OnDemandAcquireFileLock(download.ID)
+	defer release()
+
+	cacheFile, err := os.OpenFile(download.FilePath, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		// Can't cache, but still proxy to client.
+		_, _ = io.Copy(c.Writer, resp.Body)
+		return
+	}
+	defer cacheFile.Close()
+
+	buf := make([]byte, 1024*256)
+	var written int64
+	for {
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			_, _ = c.Writer.Write(buf[:n])
+			_, _ = cacheFile.WriteAt(buf[:n], writeStart+written)
+			written += int64(n)
+		}
+		if readErr != nil {
+			break
+		}
+	}
+
+	if written > 0 {
+		h.directService.OnDemandRecordRange(download.ID, writeStart, writeStart+written, total, contentType)
+	}
+}
+
+func (h *StreamHandler) serveLocalRange(c *gin.Context, filePath string, filename string, start int64, end int64, total int64) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "File not found"})
+		return
+	}
+	defer f.Close()
+
+	contentType := h.service.GetMimeType(filename)
+	contentLength := end - start + 1
+
+	c.Header("Content-Type", contentType)
+	c.Header("Accept-Ranges", "bytes")
+	c.Header("Content-Length", fmt.Sprintf("%d", contentLength))
+	c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, total))
+	c.Status(http.StatusPartialContent)
+
+	_, _ = f.Seek(start, io.SeekStart)
+	_, _ = io.CopyN(c.Writer, f, contentLength)
+}
+
+func parseByteRange(rangeHeader string) (start int64, end int64, ok bool) {
+	// Supports "bytes=start-end" where end is optional.
+	if !strings.HasPrefix(rangeHeader, "bytes=") {
+		return 0, -1, false
+	}
+	parts := strings.Split(strings.TrimPrefix(rangeHeader, "bytes="), "-")
+	if len(parts) != 2 {
+		return 0, -1, false
+	}
+	s, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || s < 0 {
+		return 0, -1, false
+	}
+	e := int64(-1)
+	if parts[1] != "" {
+		if parsed, err := strconv.ParseInt(parts[1], 10, 64); err == nil && parsed >= s {
+			e = parsed
+		}
+	}
+	return s, e, true
+}
+
+func parseContentRange(cr string) (start int64, end int64, total int64, ok bool) {
+	// Expected "bytes start-end/total"
+	if !strings.HasPrefix(cr, "bytes ") {
+		return 0, 0, 0, false
+	}
+	cr = strings.TrimPrefix(cr, "bytes ")
+	parts := strings.Split(cr, "/")
+	if len(parts) != 2 {
+		return 0, 0, 0, false
+	}
+	rangePart := parts[0]
+	totalPart := parts[1]
+
+	re := strings.Split(rangePart, "-")
+	if len(re) != 2 {
+		return 0, 0, 0, false
+	}
+	s, err := strconv.ParseInt(strings.TrimSpace(re[0]), 10, 64)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	e, err := strconv.ParseInt(strings.TrimSpace(re[1]), 10, 64)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+
+	t := int64(0)
+	if totalPart != "*" {
+		if parsed, err := strconv.ParseInt(strings.TrimSpace(totalPart), 10, 64); err == nil {
+			t = parsed
+		}
+	}
+	return s, e, t, true
 }
 
 // HandleKillStream handles DELETE /api/stream/active

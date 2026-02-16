@@ -19,15 +19,20 @@ func NewDirectDownloadHandler(service *direct.Service) *DirectDownloadHandler {
 
 func (h *DirectDownloadHandler) HandleAddDirectDownload(c *gin.Context) {
 	var urlStr string
+	mode := c.Query("mode")
 
 	// Support form-encoded and JSON
 	urlStr = c.PostForm("url")
 	if urlStr == "" {
 		var body struct {
-			URL string `json:"url"`
+			URL  string `json:"url"`
+			Mode string `json:"mode"`
 		}
 		if err := c.ShouldBindJSON(&body); err == nil {
 			urlStr = body.URL
+			if mode == "" {
+				mode = body.Mode
+			}
 		}
 	}
 
@@ -36,7 +41,15 @@ func (h *DirectDownloadHandler) HandleAddDirectDownload(c *gin.Context) {
 		return
 	}
 
-	dl, err := h.service.AddDownload(urlStr)
+	var (
+		dl  interface{}
+		err error
+	)
+	if mode == "ondemand" || mode == "on_demand" || mode == "stream" {
+		dl, err = h.service.AddOnDemand(urlStr)
+	} else {
+		dl, err = h.service.AddDownload(urlStr)
+	}
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -121,4 +134,3 @@ func (h *DirectDownloadHandler) HandleDirectDownloadAll(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true})
 }
-

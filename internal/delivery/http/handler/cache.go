@@ -275,7 +275,7 @@ func (h *CacheHandler) HandleListCachedFiles(c *gin.Context) {
 					return nil
 				}
 
-				canPlay := rec.status == "completed"
+				canPlay := rec.status == "completed" || rec.status == "on_demand"
 				streamURL := ""
 				if rec.id != 0 {
 					streamURL = fmt.Sprintf("/stream/direct/%d", rec.id)
