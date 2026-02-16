@@ -170,6 +170,8 @@ func (h *StreamHandler) handleOnDemandDirectProxy(c *gin.Context, download *doma
 		return
 	}
 
+	h.directService.StartBackgroundPrefetch(download.ID)
+
 	rangeHeader := c.GetHeader("Range")
 	start, end, hasRange := parseByteRange(rangeHeader)
 	// Serve from cache when we have a bounded range and it's already cached.
