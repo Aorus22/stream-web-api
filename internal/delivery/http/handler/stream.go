@@ -514,6 +514,29 @@ func (h *StreamHandler) handleTranscodeInternal(c *gin.Context, infoHash string,
 		startTime, _ = strconv.ParseFloat(t, 64)
 	}
 
+	// Start background sequential download (helps direct mode buffer smoothly).
+	// If the client is seeking, move the download pointer near the seek time instead.
+	if startTime <= 0 {
+		if err := h.service.StartFileDownload(infoHash, fileIndex); err != nil {
+			log.Printf("⚠️ Failed to start file download: %v", err)
+		}
+	} else {
+		// Duration is required to translate timestamp -> piece index accurately.
+		// It should be populated by /api/metadata (HandleMediaInfo) or HLS playlist probing.
+		if d, ok := h.getCachedDuration(infoHash, fileIndex); ok && d > 0 {
+			if err := h.service.SeekFileDownload(infoHash, fileIndex, startTime, d); err != nil {
+				log.Printf("⚠️ Failed to seek file download: %v", err)
+			}
+		} else if qd := c.Query("d"); qd != "" {
+			if parsed, err := strconv.ParseFloat(qd, 64); err == nil && parsed > 0 {
+				h.setCachedDuration(infoHash, fileIndex, parsed)
+				if err := h.service.SeekFileDownload(infoHash, fileIndex, startTime, parsed); err != nil {
+					log.Printf("⚠️ Failed to seek file download: %v", err)
+				}
+			}
+		}
+	}
+
 	// Ensure header is ready before starting FFmpeg to prevent probe failure
 	h.service.EnsureFileHeader(infoHash, fileIndex)
 
@@ -682,6 +705,9 @@ func (h *StreamHandler) HandleMediaInfo(c *gin.Context) {
 	duration, err := h.transcoder.GetVideoDurationFromURL(inputURL)
 	if err != nil {
 		log.Printf("Metadata error (duration): %v", err)
+	}
+	if duration > 0 {
+		h.setCachedDuration(infoHash, fileIndex, duration)
 	}
 
 	// Get Subtitles
