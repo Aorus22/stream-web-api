@@ -11,23 +11,9 @@ import (
 type SearchProvider func(query string, page int) ([]*domain.SearchResult, error)
 
 var providers = map[string]SearchProvider{
-	"1337x":          Search1337x,
-	"bitsearch":      SearchBitSearch,
-	"ettv":           SearchEttvCentral,
-	"eztv":           SearchEzTV,
-	"glotorrents":    SearchGloTorrents,
-	"kickass":        SearchKickAss,
-	"limetorrent":    SearchLimeTorrent,
-	"magnetdl":       SearchMagnetDL,
-	"nyaasi":         SearchNyaaSI,
-	"piratebay":      SearchPirateBay,
-	"rarbg":          SearchRarbg,
-	"torlock":        SearchTorLock,
-	"torrentfunk":    SearchTorrentFunk,
-	"torrentgalaxy":  SearchTorrentGalaxy,
-	"torrentproject": SearchTorrentProject,
-	"yts":            SearchYTS,
-	"zooqle":         SearchZooqle,
+	"nyaasi":      SearchNyaaSI,
+	"piratebay":   SearchPirateBay,
+	"torrentfunk": SearchTorrentFunk,
 }
 
 // Search executes a search using the specified provider
