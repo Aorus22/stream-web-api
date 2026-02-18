@@ -13,14 +13,15 @@ import (
 
 // Server represents the HTTP server
 type Server struct {
-	port            int
-	torrentHandler  *handler.TorrentHandler
-	streamHandler   *handler.StreamHandler
-	subtitleHandler *handler.SubtitleHandler
-	autosyncHandler *handler.AutoSyncHandler
-	catalogHandler  *handler.CatalogHandler
-	cacheHandler    *handler.CacheHandler
-	directHandler   *handler.DirectDownloadHandler
+	port              int
+	torrentHandler    *handler.TorrentHandler
+	streamHandler     *handler.StreamHandler
+	subtitleHandler   *handler.SubtitleHandler
+	autosyncHandler   *handler.AutoSyncHandler
+	catalogHandler    *handler.CatalogHandler
+	cacheHandler      *handler.CacheHandler
+	directHandler     *handler.DirectDownloadHandler
+	jsExecutorHandler *handler.JSExecutorHandler
 }
 
 // NewServer creates a new HTTP server
@@ -33,16 +34,18 @@ func NewServer(
 	catalogHandler *handler.CatalogHandler,
 	cacheHandler *handler.CacheHandler,
 	directHandler *handler.DirectDownloadHandler,
+	jsExecutorHandler *handler.JSExecutorHandler,
 ) *Server {
 	return &Server{
-		port:            port,
-		torrentHandler:  torrentHandler,
-		streamHandler:   streamHandler,
-		subtitleHandler: subtitleHandler,
-		autosyncHandler: autosyncHandler,
-		catalogHandler:  catalogHandler,
-		cacheHandler:    cacheHandler,
-		directHandler:   directHandler,
+		port:              port,
+		torrentHandler:    torrentHandler,
+		streamHandler:     streamHandler,
+		subtitleHandler:   subtitleHandler,
+		autosyncHandler:   autosyncHandler,
+		catalogHandler:    catalogHandler,
+		cacheHandler:      cacheHandler,
+		directHandler:     directHandler,
+		jsExecutorHandler: jsExecutorHandler,
 	}
 }
 
@@ -118,6 +121,10 @@ func (s *Server) Start() error {
 
 	// Direct stream route
 	r.GET("/stream/direct/:id", s.streamHandler.HandleDirectStream)
+
+	// JavaScript executor routes
+	r.POST("/api/js/execute", s.jsExecutorHandler.HandleExecuteJS)
+	r.POST("/api/js/preview", s.jsExecutorHandler.HandlePreviewHTML)
 
 	addr := fmt.Sprintf(":%d", s.port)
 	log.Printf("🚀 Server starting on http://0.0.0.0%s", addr)

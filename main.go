@@ -14,6 +14,7 @@ import (
 	"torrent-stream/internal/infrastructure/torrent"
 	autosyncUC "torrent-stream/internal/usecase/autosync"
 	directUC "torrent-stream/internal/usecase/direct"
+	jsExecutorUC "torrent-stream/internal/usecase/js_executor"
 	subtitleUC "torrent-stream/internal/usecase/subtitle"
 	torrentUC "torrent-stream/internal/usecase/torrent"
 )
@@ -54,6 +55,7 @@ func main() {
 	torrentService := torrentUC.NewService(torrentClient, port)
 	subtitleService := subtitleUC.NewService(opensubtitlesClient)
 	autosyncService := autosyncUC.NewService(transcoder)
+	jsExecutorService := jsExecutorUC.NewService()
 	directRepo, err := persistence.NewDirectDownloadRepository(cacheDir)
 	if err != nil {
 		log.Fatalf("Failed to init direct download persistence: %v", err)
@@ -73,6 +75,7 @@ func main() {
 	catalogHandler := handler.NewCatalogHandler(cinemetaClient)
 	cacheHandler := handler.NewCacheHandler(cacheDir, directCacheDir, hlsCacheDir, torrentService, directService)
 	directHandler := handler.NewDirectDownloadHandler(directService)
+	jsExecutorHandler := handler.NewJSExecutorHandler(jsExecutorService)
 
 	// 4. Server
 	server := http.NewServer(
@@ -84,6 +87,7 @@ func main() {
 		catalogHandler,
 		cacheHandler,
 		directHandler,
+		jsExecutorHandler,
 	)
 
 	// Start Server
