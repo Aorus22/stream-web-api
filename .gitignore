@@ -33,3 +33,5 @@ cache/
 .env
 .env.local
 torrent_data
+node_modules/
+data/

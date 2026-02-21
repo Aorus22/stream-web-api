@@ -13,14 +13,16 @@ import (
 
 // Server represents the HTTP server
 type Server struct {
-	port            int
-	torrentHandler  *handler.TorrentHandler
-	streamHandler   *handler.StreamHandler
-	subtitleHandler *handler.SubtitleHandler
-	autosyncHandler *handler.AutoSyncHandler
-	catalogHandler  *handler.CatalogHandler
-	cacheHandler    *handler.CacheHandler
-	directHandler   *handler.DirectDownloadHandler
+	port                  int
+	torrentHandler        *handler.TorrentHandler
+	streamHandler         *handler.StreamHandler
+	subtitleHandler       *handler.SubtitleHandler
+	autosyncHandler       *handler.AutoSyncHandler
+	catalogHandler        *handler.CatalogHandler
+	cacheHandler          *handler.CacheHandler
+	directHandler         *handler.DirectDownloadHandler
+	jsExecutorHandler     *handler.JSExecutorHandler
+	customProviderHandler *handler.CustomProviderHandler
 }
 
 // NewServer creates a new HTTP server
@@ -33,16 +35,20 @@ func NewServer(
 	catalogHandler *handler.CatalogHandler,
 	cacheHandler *handler.CacheHandler,
 	directHandler *handler.DirectDownloadHandler,
+	jsExecutorHandler *handler.JSExecutorHandler,
+	customProviderHandler *handler.CustomProviderHandler,
 ) *Server {
 	return &Server{
-		port:            port,
-		torrentHandler:  torrentHandler,
-		streamHandler:   streamHandler,
-		subtitleHandler: subtitleHandler,
-		autosyncHandler: autosyncHandler,
-		catalogHandler:  catalogHandler,
-		cacheHandler:    cacheHandler,
-		directHandler:   directHandler,
+		port:                  port,
+		torrentHandler:        torrentHandler,
+		streamHandler:         streamHandler,
+		subtitleHandler:       subtitleHandler,
+		autosyncHandler:       autosyncHandler,
+		catalogHandler:        catalogHandler,
+		cacheHandler:          cacheHandler,
+		directHandler:         directHandler,
+		jsExecutorHandler:     jsExecutorHandler,
+		customProviderHandler: customProviderHandler,
 	}
 }
 
@@ -66,6 +72,7 @@ func (s *Server) Start() error {
 	r.POST("/api/add", s.torrentHandler.HandleAddMagnet)
 	r.GET("/api/torrents", s.torrentHandler.HandleListTorrents)
 	r.GET("/api/search", s.torrentHandler.HandleSearch)
+	r.GET("/api/search/custom/:id", s.torrentHandler.HandleSearchCustom)
 	r.GET("/api/providers", s.torrentHandler.HandleListProviders)
 	r.GET("/api/stats/:infoHash", s.torrentHandler.HandleStats)
 	r.GET("/api/pieces/:infoHash/:fileIndex", s.torrentHandler.HandlePieceInfo)
@@ -118,6 +125,17 @@ func (s *Server) Start() error {
 
 	// Direct stream route
 	r.GET("/stream/direct/:id", s.streamHandler.HandleDirectStream)
+
+	// JavaScript executor routes
+	r.POST("/api/js/execute", s.jsExecutorHandler.HandleExecuteJS)
+	r.POST("/api/js/preview", s.jsExecutorHandler.HandlePreviewHTML)
+
+	// Custom provider routes
+	r.GET("/api/custom-providers", s.customProviderHandler.HandleGetAll)
+	r.POST("/api/custom-providers", s.customProviderHandler.HandleCreate)
+	r.GET("/api/custom-providers/:id", s.customProviderHandler.HandleGetByID)
+	r.PUT("/api/custom-providers/:id", s.customProviderHandler.HandleUpdate)
+	r.DELETE("/api/custom-providers/:id", s.customProviderHandler.HandleDelete)
 
 	addr := fmt.Sprintf(":%d", s.port)
 	log.Printf("🚀 Server starting on http://0.0.0.0%s", addr)

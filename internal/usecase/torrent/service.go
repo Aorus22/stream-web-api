@@ -108,8 +108,16 @@ func (s *Service) SearchTorrents(provider, query string, page int) ([]*domain.Se
 	return infra.Search(provider, query, page)
 }
 
-// GetSearchProviders returns available search providers
-func (s *Service) GetSearchProviders() []string {
+// ProviderInfo represents provider information
+type ProviderInfo struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	PageType string `json:"pageType"`
+}
+
+// GetHardcodedProviders returns hardcoded providers
+func (s *Service) GetHardcodedProviders() []string {
 	return infra.GetProviders()
 }
 

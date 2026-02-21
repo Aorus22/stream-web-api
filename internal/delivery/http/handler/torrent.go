@@ -1,23 +1,33 @@
 package handler
 
 import (
+	"encoding/base64"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
+	cpmodel "torrent-stream/internal/model/custom_provider"
+	cprepo "torrent-stream/internal/repository/custom_provider"
+	jsExecutorUC "torrent-stream/internal/usecase/js_executor"
 	torrentUC "torrent-stream/internal/usecase/torrent"
 )
 
 // TorrentHandler handles torrent-related requests
 type TorrentHandler struct {
-	service *torrentUC.Service
+	service    *torrentUC.Service
+	jsExecutor *jsExecutorUC.Service
+	cpRepo     *cprepo.CustomProviderRepository
 }
 
 // NewTorrentHandler creates a new torrent handler
-func NewTorrentHandler(service *torrentUC.Service) *TorrentHandler {
-	return &TorrentHandler{service: service}
+func NewTorrentHandler(service *torrentUC.Service, jsExecutor *jsExecutorUC.Service, cpRepo *cprepo.CustomProviderRepository) *TorrentHandler {
+	return &TorrentHandler{
+		service:    service,
+		jsExecutor: jsExecutor,
+		cpRepo:     cpRepo,
+	}
 }
 
 // HandleAddMagnet handles POST /api/add
@@ -137,8 +147,149 @@ func (h *TorrentHandler) HandleSearch(c *gin.Context) {
 
 // HandleListProviders handles GET /api/providers
 func (h *TorrentHandler) HandleListProviders(c *gin.Context) {
-	providers := h.service.GetSearchProviders()
-	c.JSON(http.StatusOK, providers)
+	providers := h.service.GetHardcodedProviders()
+
+	var result []torrentUC.ProviderInfo
+	for _, p := range providers {
+		if p == "all" {
+			result = append(result, torrentUC.ProviderInfo{ID: "all", Name: "all", Type: "embedded", PageType: "list"})
+		} else {
+			result = append(result, torrentUC.ProviderInfo{ID: p, Name: p, Type: "embedded", PageType: "list"})
+		}
+	}
+
+	customProviders, err := h.cpRepo.GetAll()
+	if err == nil {
+		for _, cp := range customProviders {
+			result = append(result, torrentUC.ProviderInfo{
+				ID:       cp.ID,
+				Name:     cp.Name,
+				Type:     "custom",
+				PageType: cp.PageTypeDefault,
+			})
+		}
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
+// HandleSearchCustom handles GET /api/search/custom/:id
+func (h *TorrentHandler) HandleSearchCustom(c *gin.Context) {
+	id := c.Param("id")
+	query := c.Query("query")
+	detailURL := c.Query("detailUrl")
+
+	if id == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Provider ID required"})
+		return
+	}
+
+	cp, err := h.cpRepo.GetByID(id)
+	if err != nil || cp == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Custom provider not found"})
+		return
+	}
+
+	var fullURL string
+	var pageType string
+
+	if detailURL != "" {
+		fullURL = detailURL
+		pageType = "detail"
+	} else {
+		if query == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Query required for list search"})
+			return
+		}
+		fullURL = cp.BaseURL
+		fullURL = replacePlaceholders(fullURL, query)
+		pageType = cp.PageTypeDefault
+		if pageType == "" {
+			pageType = "list"
+		}
+	}
+
+	code := cp.Code
+	decoded, err := base64.StdEncoding.DecodeString(code)
+	if err == nil {
+		code = string(decoded)
+	}
+
+	result, err := h.jsExecutor.Execute(c.Request.Context(), code, fullURL, pageType)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
+func replacePlaceholders(template, query string) string {
+	return replaceAll(template, "{q}", query,
+		"{query}", query,
+		"{search}", query,
+		"{raw_q}", query,
+		"{raw_query}", query,
+		"{raw_search}", query)
+}
+
+func replaceAll(s string, pairs ...string) string {
+	for i := 0; i < len(pairs); i += 2 {
+		if i+1 < len(pairs) {
+			s = replaceString(s, pairs[i], pairs[i+1])
+		}
+	}
+	return s
+}
+
+func replaceString(s, old, new string) string {
+	result := ""
+	for i := 0; i < len(s); {
+		if i+len(old) <= len(s) && s[i:i+len(old)] == old {
+			result += new
+			i += len(old)
+		} else {
+			result += string(s[i])
+			i++
+		}
+	}
+	return result
+}
+
+// HandleSearchCustomDetail handles GET /api/search/custom/:id/detail
+func (h *TorrentHandler) HandleSearchCustomDetail(c *gin.Context) {
+	id := c.Param("id")
+	detailURL := c.Query("url")
+
+	if id == "" || detailURL == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Provider ID and URL required"})
+		return
+	}
+
+	cp, err := h.cpRepo.GetByID(id)
+	if err != nil || cp == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Custom provider not found"})
+		return
+	}
+
+	code := cp.Code
+	decoded, err := base64.StdEncoding.DecodeString(code)
+	if err == nil {
+		code = string(decoded)
+	}
+
+	result, err := h.jsExecutor.Execute(c.Request.Context(), code, detailURL, "detail")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
+type CustomProviderResponse struct {
+	*cpmodel.CustomProvider
+	CodeHidden bool `json:"codeHidden"`
 }
 
 // HandleStatsSSE handles GET /api/stats/:infoHash/stream
