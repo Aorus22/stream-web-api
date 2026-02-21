@@ -5,8 +5,6 @@ import (
 	"log"
 	"path/filepath"
 	"time"
-
-	_ "modernc.org/sqlite"
 )
 
 // TorrentRepository handles active torrent persistence

@@ -5,13 +5,11 @@ import (
 	"os"
 	"path/filepath"
 
-	"gorm.io/driver/sqlite"
+	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
 	"torrent-stream/internal/model/custom_provider"
-
-	_ "modernc.org/sqlite"
 )
 
 // NewDB creates a new database connection

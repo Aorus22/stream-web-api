@@ -1,0 +1,21 @@
+services:
+  api:
+    image: aorus22/stream-web-api:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: torrent-stream-api
+    restart: unless-stopped
+    ports:
+      - "6432:6432"
+    environment:
+      - GIN_MODE=release
+    volumes:
+      - ./data:/app/data
+      - ./torrent_data:/app/torrent_data
+      - ./hls_cache:/app/hls_cache
+
+volumes:
+  data:
+  torrent_data:
+  hls_cache:

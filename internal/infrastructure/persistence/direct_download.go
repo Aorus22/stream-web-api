@@ -6,8 +6,6 @@ import (
 	"time"
 
 	"torrent-stream/internal/domain"
-
-	_ "modernc.org/sqlite"
 )
 
 type DirectDownloadRepository struct {

@@ -5,6 +5,8 @@
 *.so
 *.dylib
 server
+torrent-stream
+torrent-stream.exe
 
 # Test binary
 *.test
@@ -14,6 +16,7 @@ server
 
 # Dependency directories
 vendor/
+node_modules/
 
 # IDE
 .idea/
@@ -27,15 +30,37 @@ Thumbs.db
 
 # Docker
 docker-compose.override.yml
+docker-compose.dev.yml
+Dockerfile.dev
 
 # Cache
 cache/
 .cache/
+.gomodcache/
 
 # Git
 .git/
 .gitignore
+.claude/
+
+# Environment (use .env.example as reference)
+.env
+.env.local
+
+# Storage (mounted as volumes)
+data/
+torrent_data/
+hls_cache/
+
+# Logs
+*.log
+logs/
 
 # Docs
 *.md
 !README.md
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+travis.yml
