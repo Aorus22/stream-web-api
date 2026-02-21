@@ -13,9 +13,9 @@ import (
 	"torrent-stream/internal/infrastructure/opensubtitles"
 	"torrent-stream/internal/infrastructure/persistence"
 	"torrent-stream/internal/infrastructure/torrent"
+	cprepo "torrent-stream/internal/repository/custom_provider"
 	autosyncUC "torrent-stream/internal/usecase/autosync"
 	customProviderUC "torrent-stream/internal/usecase/custom_provider"
-	cprepo "torrent-stream/internal/repository/custom_provider"
 	directUC "torrent-stream/internal/usecase/direct"
 	jsExecutorUC "torrent-stream/internal/usecase/js_executor"
 	subtitleUC "torrent-stream/internal/usecase/subtitle"
@@ -91,7 +91,7 @@ func main() {
 	customProviderService := customProviderUC.NewCustomProviderUsecase(customProviderRepo)
 
 	// 3. Handlers
-	torrentHandler := handler.NewTorrentHandler(torrentService)
+	torrentHandler := handler.NewTorrentHandler(torrentService, jsExecutorService, customProviderRepo)
 	streamHandler := handler.NewStreamHandler(torrentService, directService, transcoder, hlsCacheDir)
 	subtitleHandler := handler.NewSubtitleHandler(subtitleService)
 	autosyncHandler := handler.NewAutoSyncHandler(autosyncService, subtitleService, port)

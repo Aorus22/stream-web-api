@@ -13,15 +13,15 @@ import (
 
 // Server represents the HTTP server
 type Server struct {
-	port                 int
-	torrentHandler       *handler.TorrentHandler
-	streamHandler        *handler.StreamHandler
-	subtitleHandler      *handler.SubtitleHandler
-	autosyncHandler      *handler.AutoSyncHandler
-	catalogHandler       *handler.CatalogHandler
-	cacheHandler         *handler.CacheHandler
-	directHandler        *handler.DirectDownloadHandler
-	jsExecutorHandler    *handler.JSExecutorHandler
+	port                  int
+	torrentHandler        *handler.TorrentHandler
+	streamHandler         *handler.StreamHandler
+	subtitleHandler       *handler.SubtitleHandler
+	autosyncHandler       *handler.AutoSyncHandler
+	catalogHandler        *handler.CatalogHandler
+	cacheHandler          *handler.CacheHandler
+	directHandler         *handler.DirectDownloadHandler
+	jsExecutorHandler     *handler.JSExecutorHandler
 	customProviderHandler *handler.CustomProviderHandler
 }
 
@@ -39,15 +39,15 @@ func NewServer(
 	customProviderHandler *handler.CustomProviderHandler,
 ) *Server {
 	return &Server{
-		port:              port,
-		torrentHandler:    torrentHandler,
-		streamHandler:     streamHandler,
-		subtitleHandler:   subtitleHandler,
-		autosyncHandler:   autosyncHandler,
-		catalogHandler:    catalogHandler,
-		cacheHandler:         cacheHandler,
-		directHandler:        directHandler,
-		jsExecutorHandler:    jsExecutorHandler,
+		port:                  port,
+		torrentHandler:        torrentHandler,
+		streamHandler:         streamHandler,
+		subtitleHandler:       subtitleHandler,
+		autosyncHandler:       autosyncHandler,
+		catalogHandler:        catalogHandler,
+		cacheHandler:          cacheHandler,
+		directHandler:         directHandler,
+		jsExecutorHandler:     jsExecutorHandler,
 		customProviderHandler: customProviderHandler,
 	}
 }
@@ -72,6 +72,7 @@ func (s *Server) Start() error {
 	r.POST("/api/add", s.torrentHandler.HandleAddMagnet)
 	r.GET("/api/torrents", s.torrentHandler.HandleListTorrents)
 	r.GET("/api/search", s.torrentHandler.HandleSearch)
+	r.GET("/api/search/custom/:id", s.torrentHandler.HandleSearchCustom)
 	r.GET("/api/providers", s.torrentHandler.HandleListProviders)
 	r.GET("/api/stats/:infoHash", s.torrentHandler.HandleStats)
 	r.GET("/api/pieces/:infoHash/:fileIndex", s.torrentHandler.HandlePieceInfo)
