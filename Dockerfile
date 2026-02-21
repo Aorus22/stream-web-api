@@ -19,17 +19,12 @@ FROM alpine:3.19
 
 RUN apk add --no-cache \
     ffmpeg \
-    nodejs \
-    npm \
     ca-certificates \
     sqlite
 
 WORKDIR /app
 
 COPY --from=builder /app/torrent-stream .
-
-COPY package.json package-lock.json ./
-RUN npm ci --production
 
 RUN mkdir -p /app/data /app/torrent_data /app/hls_cache
 

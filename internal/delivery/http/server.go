@@ -21,7 +21,7 @@ type Server struct {
 	catalogHandler        *handler.CatalogHandler
 	cacheHandler          *handler.CacheHandler
 	directHandler         *handler.DirectDownloadHandler
-	jsExecutorHandler     *handler.JSExecutorHandler
+	scriptExecutorHandler *handler.ScriptExecutorHandler
 	customProviderHandler *handler.CustomProviderHandler
 }
 
@@ -35,7 +35,7 @@ func NewServer(
 	catalogHandler *handler.CatalogHandler,
 	cacheHandler *handler.CacheHandler,
 	directHandler *handler.DirectDownloadHandler,
-	jsExecutorHandler *handler.JSExecutorHandler,
+	scriptExecutorHandler *handler.ScriptExecutorHandler,
 	customProviderHandler *handler.CustomProviderHandler,
 ) *Server {
 	return &Server{
@@ -47,7 +47,7 @@ func NewServer(
 		catalogHandler:        catalogHandler,
 		cacheHandler:          cacheHandler,
 		directHandler:         directHandler,
-		jsExecutorHandler:     jsExecutorHandler,
+		scriptExecutorHandler: scriptExecutorHandler,
 		customProviderHandler: customProviderHandler,
 	}
 }
@@ -126,9 +126,9 @@ func (s *Server) Start() error {
 	// Direct stream route
 	r.GET("/stream/direct/:id", s.streamHandler.HandleDirectStream)
 
-	// JavaScript executor routes
-	r.POST("/api/js/execute", s.jsExecutorHandler.HandleExecuteJS)
-	r.POST("/api/js/preview", s.jsExecutorHandler.HandlePreviewHTML)
+	// Script executor routes
+	r.POST("/api/js/execute", s.scriptExecutorHandler.HandleExecuteScript)
+	r.POST("/api/js/preview", s.scriptExecutorHandler.HandlePreviewHTML)
 
 	// Custom provider routes
 	r.GET("/api/custom-providers", s.customProviderHandler.HandleGetAll)

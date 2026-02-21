@@ -10,23 +10,23 @@ import (
 
 	cpmodel "torrent-stream/internal/model/custom_provider"
 	cprepo "torrent-stream/internal/repository/custom_provider"
-	jsExecutorUC "torrent-stream/internal/usecase/js_executor"
+	scriptExecutorUC "torrent-stream/internal/usecase/script_executor"
 	torrentUC "torrent-stream/internal/usecase/torrent"
 )
 
 // TorrentHandler handles torrent-related requests
 type TorrentHandler struct {
-	service    *torrentUC.Service
-	jsExecutor *jsExecutorUC.Service
-	cpRepo     *cprepo.CustomProviderRepository
+	service        *torrentUC.Service
+	scriptExecutor *scriptExecutorUC.Service
+	cpRepo         *cprepo.CustomProviderRepository
 }
 
 // NewTorrentHandler creates a new torrent handler
-func NewTorrentHandler(service *torrentUC.Service, jsExecutor *jsExecutorUC.Service, cpRepo *cprepo.CustomProviderRepository) *TorrentHandler {
+func NewTorrentHandler(service *torrentUC.Service, scriptExecutor *scriptExecutorUC.Service, cpRepo *cprepo.CustomProviderRepository) *TorrentHandler {
 	return &TorrentHandler{
-		service:    service,
-		jsExecutor: jsExecutor,
-		cpRepo:     cpRepo,
+		service:        service,
+		scriptExecutor: scriptExecutor,
+		cpRepo:         cpRepo,
 	}
 }
 
@@ -215,7 +215,12 @@ func (h *TorrentHandler) HandleSearchCustom(c *gin.Context) {
 		code = string(decoded)
 	}
 
-	result, err := h.jsExecutor.Execute(c.Request.Context(), code, fullURL, pageType)
+	language := cp.Language
+	if language == "" {
+		language = "javascript"
+	}
+
+	result, err := h.scriptExecutor.Execute(c.Request.Context(), code, fullURL, pageType, language)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -278,7 +283,12 @@ func (h *TorrentHandler) HandleSearchCustomDetail(c *gin.Context) {
 		code = string(decoded)
 	}
 
-	result, err := h.jsExecutor.Execute(c.Request.Context(), code, detailURL, "detail")
+	language := cp.Language
+	if language == "" {
+		language = "javascript"
+	}
+
+	result, err := h.scriptExecutor.Execute(c.Request.Context(), code, detailURL, "detail", language)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

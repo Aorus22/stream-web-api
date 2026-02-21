@@ -8,28 +8,29 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	jsExecutorUC "torrent-stream/internal/usecase/js_executor"
+	scriptExecutorUC "torrent-stream/internal/usecase/script_executor"
 )
 
-// JSExecutorHandler handles JavaScript execution requests
-type JSExecutorHandler struct {
-	service *jsExecutorUC.Service
+// ScriptExecutorHandler handles script execution requests (JS/Lua)
+type ScriptExecutorHandler struct {
+	service *scriptExecutorUC.Service
 }
 
-// NewJSExecutorHandler creates a new JS executor handler
-func NewJSExecutorHandler(service *jsExecutorUC.Service) *JSExecutorHandler {
-	return &JSExecutorHandler{
+// NewScriptExecutorHandler creates a new script executor handler
+func NewScriptExecutorHandler(service *scriptExecutorUC.Service) *ScriptExecutorHandler {
+	return &ScriptExecutorHandler{
 		service: service,
 	}
 }
 
-// HandleExecuteJS handles POST /api/js/execute
-func (h *JSExecutorHandler) HandleExecuteJS(c *gin.Context) {
+// HandleExecuteScript handles POST /api/js/execute (retained path for compatibility)
+func (h *ScriptExecutorHandler) HandleExecuteScript(c *gin.Context) {
 	var req struct {
 		Code     string `json:"code"`
 		URL      string `json:"url"`
 		PageType string `json:"pageType"`
 		IsBase64 bool   `json:"isBase64"`
+		Language string `json:"language"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -64,7 +65,12 @@ func (h *JSExecutorHandler) HandleExecuteJS(c *gin.Context) {
 		pageType = "list"
 	}
 
-	result, err := h.service.Execute(c.Request.Context(), code, req.URL, pageType)
+	language := req.Language
+	if language == "" {
+		language = "javascript"
+	}
+
+	result, err := h.service.Execute(c.Request.Context(), code, req.URL, pageType, language)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -75,7 +81,7 @@ func (h *JSExecutorHandler) HandleExecuteJS(c *gin.Context) {
 
 // HandlePreviewHTML handles POST /api/js/preview
 // Fetches HTML from the given URL
-func (h *JSExecutorHandler) HandlePreviewHTML(c *gin.Context) {
+func (h *ScriptExecutorHandler) HandlePreviewHTML(c *gin.Context) {
 	var req struct {
 		URL string `json:"url"`
 	}

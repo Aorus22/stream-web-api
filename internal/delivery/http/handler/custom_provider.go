@@ -23,6 +23,7 @@ type CreateRequest struct {
 	BaseURL  string `json:"baseUrl"`
 	PageType string `json:"pageType"`
 	Code     string `json:"code"`
+	Language string `json:"language"`
 }
 
 // HandleCreate handles POST /api/custom-providers
@@ -33,7 +34,12 @@ func (h *CustomProviderHandler) HandleCreate(c *gin.Context) {
 		return
 	}
 
-	provider, err := h.uc.Create(req.Name, req.BaseURL, req.PageType, req.Code)
+	language := req.Language
+	if language == "" {
+		language = "javascript"
+	}
+
+	provider, err := h.uc.Create(req.Name, req.BaseURL, req.PageType, req.Code, language)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -76,7 +82,12 @@ func (h *CustomProviderHandler) HandleUpdate(c *gin.Context) {
 		return
 	}
 
-	provider, err := h.uc.Update(id, req.Name, req.BaseURL, req.PageType, req.Code)
+	language := req.Language
+	if language == "" {
+		language = "javascript"
+	}
+
+	provider, err := h.uc.Update(id, req.Name, req.BaseURL, req.PageType, req.Code, language)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

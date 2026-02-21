@@ -1,0 +1,91 @@
+package script_executor
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"strconv"
+	"time"
+)
+
+// JSExecutor handles JavaScript execution via Node.js
+type JSExecutor struct {
+	nodePath string
+	timeout  time.Duration
+}
+
+func (jx *JSExecutor) Run(ctx context.Context, code, url, pageType string) (*ExecuteResult, error) {
+	workingDir, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get working directory: %w", err)
+	}
+
+	tempFile, err := os.CreateTemp(workingDir, "js-executor-*.js")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp file: %w", err)
+	}
+	defer os.Remove(tempFile.Name())
+	defer tempFile.Close()
+
+	wrapperScript := jx.buildWrapperScript(code, pageType)
+	if err := os.WriteFile(tempFile.Name(), []byte(wrapperScript), 0644); err != nil {
+		return nil, fmt.Errorf("failed to write script file: %w", err)
+	}
+
+	execCtx, cancel := context.WithTimeout(ctx, jx.timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(execCtx, jx.nodePath, tempFile.Name(), url, pageType)
+	cmd.Dir = workingDir
+
+	output, err := cmd.Output()
+	
+	// Handle execution errors
+	if err != nil {
+		if len(output) > 0 {
+			var result ExecuteResult
+			if jsonErr := json.Unmarshal(output, &result); jsonErr == nil && result.Error != "" {
+				return &result, nil
+			}
+		}
+		
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return &ExecuteResult{Error: string(exitErr.Stderr)}, nil
+		}
+		
+		if execCtx.Err() == context.DeadlineExceeded {
+			return &ExecuteResult{Error: "Execution timeout"}, nil
+		}
+		return &ExecuteResult{Error: err.Error()}, nil
+	}
+
+	var result ExecuteResult
+	if err := json.Unmarshal(output, &result); err != nil {
+		return &ExecuteResult{Error: fmt.Sprintf("Failed to parse output: %v. Raw: %s", err, string(output))}, nil
+	}
+
+	return &result, nil
+}
+
+func (jx *JSExecutor) buildWrapperScript(userCode, pageType string) string {
+	return fmt.Sprintf("const ARG_FULL_URL = process.argv[2];\n" +
+		"const ARG_PAGE_TYPE = process.argv[3] || 'list';\n" +
+		"\n" +
+		"(async () => {\n" +
+		"  try {\n" +
+		"    const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;\n" +
+		"    const userFunction = new AsyncFunction('ARG_FULL_URL', 'ARG_PAGE_TYPE', 'require', 'module', %s);\n" +
+		"    const result = await userFunction(ARG_FULL_URL, ARG_PAGE_TYPE, require, module);\n" +
+		"    process.stdout.write(JSON.stringify({ result }));\n" +
+		"    process.exit(0);\n" +
+		"  } catch (error) {\n" +
+		"    process.stdout.write(JSON.stringify({\n" +
+		"      result: null,\n" +
+		"      error: error.message || String(error)\n" +
+		"    }));\n" +
+		"    process.exit(1);\n" +
+		"  }\n" +
+		"})();\n", strconv.Quote(userCode))
+}

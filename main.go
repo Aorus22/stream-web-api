@@ -17,7 +17,7 @@ import (
 	autosyncUC "torrent-stream/internal/usecase/autosync"
 	customProviderUC "torrent-stream/internal/usecase/custom_provider"
 	directUC "torrent-stream/internal/usecase/direct"
-	jsExecutorUC "torrent-stream/internal/usecase/js_executor"
+	scriptExecutorUC "torrent-stream/internal/usecase/script_executor"
 	subtitleUC "torrent-stream/internal/usecase/subtitle"
 	torrentUC "torrent-stream/internal/usecase/torrent"
 )
@@ -74,7 +74,7 @@ func main() {
 	torrentService := torrentUC.NewService(torrentClient, port)
 	subtitleService := subtitleUC.NewService(opensubtitlesClient)
 	autosyncService := autosyncUC.NewService(transcoder)
-	jsExecutorService := jsExecutorUC.NewService()
+	scriptExecutorService := scriptExecutorUC.NewService()
 	directRepo, err := persistence.NewDirectDownloadRepository(cacheDir)
 	if err != nil {
 		log.Fatalf("Failed to init direct download persistence: %v", err)
@@ -91,14 +91,14 @@ func main() {
 	customProviderService := customProviderUC.NewCustomProviderUsecase(customProviderRepo)
 
 	// 3. Handlers
-	torrentHandler := handler.NewTorrentHandler(torrentService, jsExecutorService, customProviderRepo)
+	torrentHandler := handler.NewTorrentHandler(torrentService, scriptExecutorService, customProviderRepo)
 	streamHandler := handler.NewStreamHandler(torrentService, directService, transcoder, hlsCacheDir)
 	subtitleHandler := handler.NewSubtitleHandler(subtitleService)
 	autosyncHandler := handler.NewAutoSyncHandler(autosyncService, subtitleService, port)
 	catalogHandler := handler.NewCatalogHandler(cinemetaClient)
 	cacheHandler := handler.NewCacheHandler(cacheDir, directCacheDir, hlsCacheDir, torrentService, directService)
 	directHandler := handler.NewDirectDownloadHandler(directService)
-	jsExecutorHandler := handler.NewJSExecutorHandler(jsExecutorService)
+	scriptExecutorHandler := handler.NewScriptExecutorHandler(scriptExecutorService)
 	customProviderHandler := handler.NewCustomProviderHandler(customProviderService)
 
 	// 4. Server
@@ -111,7 +111,7 @@ func main() {
 		catalogHandler,
 		cacheHandler,
 		directHandler,
-		jsExecutorHandler,
+		scriptExecutorHandler,
 		customProviderHandler,
 	)
 

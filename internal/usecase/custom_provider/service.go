@@ -19,7 +19,7 @@ func NewCustomProviderUsecase(repo *cprepo.CustomProviderRepository) *CustomProv
 }
 
 // Create creates a new custom provider
-func (uc *CustomProviderUsecase) Create(name, baseURL, pageType, code string) (*cpmodel.CustomProvider, error) {
+func (uc *CustomProviderUsecase) Create(name, baseURL, pageType, code, language string) (*cpmodel.CustomProvider, error) {
 	if name == "" {
 		return nil, errors.New("name is required")
 	}
@@ -36,6 +36,7 @@ func (uc *CustomProviderUsecase) Create(name, baseURL, pageType, code string) (*
 		BaseURL:         baseURL,
 		PageTypeDefault: pageType,
 		Code:            code,
+		Language:        language,
 	}
 
 	if err := uc.repo.Create(provider); err != nil {
@@ -68,7 +69,7 @@ func (uc *CustomProviderUsecase) GetByID(id string) (*cpmodel.CustomProvider, er
 }
 
 // Update updates an existing custom provider
-func (uc *CustomProviderUsecase) Update(id, name, baseURL, pageType, code string) (*cpmodel.CustomProvider, error) {
+func (uc *CustomProviderUsecase) Update(id, name, baseURL, pageType, code, language string) (*cpmodel.CustomProvider, error) {
 	if id == "" {
 		return nil, errors.New("id is required")
 	}
@@ -91,6 +92,7 @@ func (uc *CustomProviderUsecase) Update(id, name, baseURL, pageType, code string
 	provider.BaseURL = baseURL
 	provider.PageTypeDefault = pageType
 	provider.Code = code
+	provider.Language = language
 
 	if err := uc.repo.Update(provider); err != nil {
 		return nil, err
