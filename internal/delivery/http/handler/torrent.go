@@ -302,6 +302,37 @@ type CustomProviderResponse struct {
 	CodeHidden bool `json:"codeHidden"`
 }
 
+// HandleAllTorrentsSSE handles GET /api/torrents/stream
+func (h *TorrentHandler) HandleAllTorrentsSSE(c *gin.Context) {
+	// Set headers for SSE
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("Transfer-Encoding", "chunked")
+
+	// Flush the response immediately to ensure the client sees the connection
+	c.Writer.Flush()
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	// Initial send
+	stats := h.service.ListTorrents()
+	c.SSEvent("message", stats)
+	c.Writer.Flush()
+
+	for {
+		select {
+		case <-c.Request.Context().Done():
+			return
+		case <-ticker.C:
+			stats := h.service.ListTorrents()
+			c.SSEvent("message", stats)
+			c.Writer.Flush()
+		}
+	}
+}
+
 // HandleStatsSSE handles GET /api/stats/:infoHash/stream
 func (h *TorrentHandler) HandleStatsSSE(c *gin.Context) {
 	infoHash := c.Param("infoHash")

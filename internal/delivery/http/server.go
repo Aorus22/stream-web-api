@@ -78,6 +78,7 @@ func (s *Server) Start() error {
 	r.GET("/api/pieces/:infoHash/:fileIndex", s.torrentHandler.HandlePieceInfo)
 	r.DELETE("/api/remove/:infoHash", s.torrentHandler.HandleRemove)
 	r.DELETE("/api/torrents/all", s.torrentHandler.HandleRemoveAll)
+	r.GET("/api/torrents/stream", s.torrentHandler.HandleAllTorrentsSSE)
 	r.GET("/api/stats/:infoHash/stream", s.torrentHandler.HandleStatsSSE)
 
 	// Stream routes
@@ -118,6 +119,7 @@ func (s *Server) Start() error {
 	// Direct download routes
 	r.POST("/api/direct/add", s.directHandler.HandleAddDirectDownload)
 	r.GET("/api/direct", s.directHandler.HandleListDirectDownloads)
+	r.GET("/api/direct/stream", s.directHandler.HandleAllDirectDownloadsSSE)
 	r.GET("/api/direct/:id", s.directHandler.HandleGetDirectDownload)
 	r.DELETE("/api/direct/:id", s.directHandler.HandleDeleteDirectDownload)
 	r.GET("/api/direct/:id/progress", s.directHandler.HandleDirectDownloadProgress)

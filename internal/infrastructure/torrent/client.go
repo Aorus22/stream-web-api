@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -408,9 +409,21 @@ func (c *Client) ListTorrents(port int) []*domain.Torrent {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
+	// Get all wrappers first to sort them
+	var wrappers []*Wrapper
+	for _, w := range c.torrents {
+		wrappers = append(wrappers, w)
+	}
+
+	// Sort by AddedAt descending (newest first)
+	sort.Slice(wrappers, func(i, j int) bool {
+		return wrappers[i].AddedAt.After(wrappers[j].AddedAt)
+	})
+
 	var stats []*domain.Torrent
-	for hash := range c.torrents {
-		s, err := c.GetStats(hash, "", port)
+	for _, w := range wrappers {
+		infoHash := w.Torrent.InfoHash().HexString()
+		s, err := c.GetStats(infoHash, "", port)
 		if err == nil {
 			stats = append(stats, s)
 		}
