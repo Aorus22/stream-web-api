@@ -84,6 +84,7 @@ func (s *Server) Start() error {
 	// Stream routes
 	r.GET("/stream/:infoHash/:fileIndex", s.streamHandler.HandleStream)
 	r.GET("/transcode/:infoHash/:fileIndex", s.streamHandler.HandleTranscode)
+	r.POST("/api/reencode", s.streamHandler.HandleReencode)
 	r.GET("/api/duration/:infoHash/:fileIndex", s.streamHandler.HandleDuration)
 	r.GET("/api/metadata/:infoHash/:fileIndex", s.streamHandler.HandleMediaInfo)
 	r.GET("/api/stream/:infoHash/:fileIndex/sub/:streamIndex", s.streamHandler.HandleStreamSubtitle)
@@ -115,6 +116,7 @@ func (s *Server) Start() error {
 	r.GET("/api/cache/stats", s.cacheHandler.HandleCacheStats)
 	r.DELETE("/api/cache/all", s.cacheHandler.HandleRemoveAllCache)
 	r.DELETE("/api/cache/:infoHash", s.cacheHandler.HandleDeleteCachedFile)
+	r.GET("/api/exports/*path", s.cacheHandler.HandleServeExport)
 
 	// Direct download routes
 	r.POST("/api/direct/add", s.directHandler.HandleAddDirectDownload)

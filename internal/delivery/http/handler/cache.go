@@ -219,6 +219,36 @@ func (h *CacheHandler) HandleListCachedFiles(c *gin.Context) {
 		return
 	}
 
+	// Add exported (reencoded) files
+	exportDir := filepath.Join(h.cacheDir, "exports")
+	_ = filepath.Walk(exportDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		if !isVideoFile(info.Name()) {
+			return nil
+		}
+
+		relPath, _ := filepath.Rel(exportDir, path)
+		relPath = filepath.ToSlash(relPath)
+
+		// Create a fake stream URL that just downloads the file
+		// We'll add a new endpoint or use an existing one if possible.
+		// For now, let's just make it downloadable via a new /exports route or similar.
+		// Actually, I should add a route to serve these files.
+
+		cachedFiles = append(cachedFiles, CachedFileWithType{
+			Name:      info.Name(),
+			Path:      "exports/" + relPath,
+			Size:      info.Size(),
+			Type:      "direct",
+			Status:    "completed",
+			StreamURL: "/api/exports/" + relPath, // New endpoint needed
+			CanPlay:   false,                      // As requested "ga bisa di stream kayak yang normal"
+		})
+		return nil
+	})
+
 	// Add direct downloads (DB + filesystem)
 	if h.directService != nil && h.directCacheDir != "" {
 		downloads, err := h.directService.ListDownloads()
@@ -418,4 +448,34 @@ func (h *CacheHandler) HandleCacheStats(c *gin.Context) {
 		"fileCount": fileCount,
 		"cacheDir":  h.cacheDir,
 	})
+}
+
+// HandleServeExport handles GET /api/exports/*path
+func (h *CacheHandler) HandleServeExport(c *gin.Context) {
+	relPath := c.Param("path")
+	if relPath == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Path required"})
+		return
+	}
+
+	// Clean path to prevent directory traversal
+	relPath = filepath.Clean(strings.TrimPrefix(relPath, "/"))
+	fullPath := filepath.Join(h.cacheDir, "exports", relPath)
+
+	// Ensure the file exists and is within the exports directory
+	if !strings.HasPrefix(fullPath, filepath.Join(h.cacheDir, "exports")) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
+		return
+	}
+
+	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Export file not found"})
+		return
+	}
+
+	// Set content disposition to download
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filepath.Base(fullPath)))
+
+	// Use gin's built-in File server to support ranges
+	c.File(fullPath)
 }

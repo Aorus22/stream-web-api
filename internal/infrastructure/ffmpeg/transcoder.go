@@ -230,6 +230,50 @@ func (t *Transcoder) TranscodeStream(ctx context.Context, w http.ResponseWriter,
 	return nil
 }
 
+// ReencodeToFile reencodes a video to a file with specific resolution and bitrate.
+func (t *Transcoder) ReencodeToFile(ctx context.Context, inputURL string, outputPath string, resolution string, bitrate string) error {
+	if t == nil {
+		return fmt.Errorf("transcoder not available")
+	}
+
+	release, err := t.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to acquire FFmpeg slot: %w", err)
+	}
+	defer release()
+
+	log.Printf("🎬 Reencoding to file: %s (Res: %s, Bitrate: %s)", outputPath, resolution, bitrate)
+
+	args := []string{
+		"-fflags", "+genpts+igndts",
+		"-i", inputURL,
+		"-c:v", "libx264",
+		"-preset", "veryfast",
+		"-vf", fmt.Sprintf("scale=%s", resolution),
+		"-b:v", bitrate,
+		"-maxrate", bitrate,
+		"-bufsize", "4000k",
+		"-c:a", "aac",
+		"-b:a", "128k",
+		"-movflags", "+faststart",
+		"-y", // Overwrite output file
+		outputPath,
+	}
+
+	cmd := exec.CommandContext(ctx, t.FFmpegPath, args...)
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		log.Printf("❌ Reencode error output:\n%s", stderr.String())
+		return fmt.Errorf("reencode error: %w", err)
+	}
+
+	log.Printf("✅ Reencode complete: %s", outputPath)
+	return nil
+}
+
 // GetStreamDetails returns the video and audio codec names.
 // Automatically acquires and releases a pool slot.
 func (t *Transcoder) GetStreamDetails(inputURL string) (videoCodec, audioCodec string, err error) {

@@ -674,6 +674,124 @@ func (h *StreamHandler) HandleStreamSubtitle(c *gin.Context) {
 	c.JSON(http.StatusOK, cues)
 }
 
+// HandleReencode handles POST /api/reencode
+func (h *StreamHandler) HandleReencode(c *gin.Context) {
+	if h.transcoder == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Transcoder not available (FFmpeg not found)"})
+		return
+	}
+
+	var req struct {
+		InfoHash   string `json:"infoHash"`
+		FileIndex  int    `json:"fileIndex"`
+		DownloadID int    `json:"downloadId"`
+		Resolution string `json:"resolution"` // e.g., "1280x720"
+		Bitrate    string `json:"bitrate"`    // e.g., "2000k"
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		return
+	}
+
+	if req.Resolution == "" {
+		req.Resolution = "1280:720" // Default 720p (using colon for FFmpeg scale filter)
+	} else {
+		// Ensure it uses : instead of x for FFmpeg
+		req.Resolution = strings.Replace(req.Resolution, "x", ":", 1)
+	}
+
+	if req.Bitrate == "" {
+		req.Bitrate = "2000k"
+	}
+
+	var inputURL string
+	var filename string
+	var baseDir string
+
+	if req.InfoHash != "" {
+		// Torrent file
+		t := h.service.GetTorrent(req.InfoHash)
+		if t == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Torrent not found"})
+			return
+		}
+
+		torrentHandle, ok := t.(*torrent.Torrent)
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid torrent handle"})
+			return
+		}
+
+		files := torrentHandle.Files()
+		if req.FileIndex < 0 || req.FileIndex >= len(files) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file index"})
+			return
+		}
+
+		file := files[req.FileIndex]
+		filename = file.DisplayPath()
+		inputURL = fmt.Sprintf("http://127.0.0.1:%d/stream/%s/%d?raw=true", h.service.GetPort(), req.InfoHash, req.FileIndex)
+		baseDir = filepath.Join(h.cacheDir, "exports", req.InfoHash)
+
+		// Start download if not done
+		h.service.StartFileDownload(req.InfoHash, req.FileIndex)
+	} else if req.DownloadID != 0 {
+		// Direct download
+		dl, err := h.directService.GetDownload(req.DownloadID)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Download not found"})
+			return
+		}
+
+		filename = dl.Filename
+		if dl.Status == "on_demand" {
+			inputURL = dl.URL
+		} else {
+			inputURL = fmt.Sprintf("http://127.0.0.1:%d/stream/direct/%d?raw=true", h.service.GetPort(), req.DownloadID)
+		}
+		baseDir = filepath.Join(h.cacheDir, "exports", fmt.Sprintf("direct_%d", req.DownloadID))
+	} else {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "infoHash or downloadId required"})
+		return
+	}
+
+	// Create output path
+	if err := os.MkdirAll(baseDir, 0755); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create export directory"})
+		return
+	}
+
+	// Sanitize filename for output
+	cleanName := filepath.Base(filename)
+	ext := filepath.Ext(cleanName)
+	nameWithoutExt := strings.TrimSuffix(cleanName, ext)
+	outName := fmt.Sprintf("%s_%s.mp4", nameWithoutExt, strings.ReplaceAll(req.Resolution, ":", "p"))
+	outputPath := filepath.Join(baseDir, outName)
+
+	// Start reencoding in background
+	go func() {
+		log.Printf("🚀 Reencoding background job started for %s", filename)
+		// Use a long timeout for background reencoding
+		ctx, cancel := context.WithTimeout(context.Background(), 24*time.Hour)
+		defer cancel()
+
+		err := h.transcoder.ReencodeToFile(ctx, inputURL, outputPath, req.Resolution, req.Bitrate)
+		if err != nil {
+			log.Printf("❌ Background reencode failed for %s: %v", filename, err)
+			// Maybe clean up partial file
+			os.Remove(outputPath)
+		} else {
+			log.Printf("✅ Background reencode complete: %s", outputPath)
+		}
+	}()
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":    "Reencoding started in background",
+		"outputPath": outputPath,
+	})
+}
+
 // HandleMediaInfo handles GET /api/metadata/:infoHash/:fileIndex
 func (h *StreamHandler) HandleMediaInfo(c *gin.Context) {
 	infoHash := c.Param("infoHash")
