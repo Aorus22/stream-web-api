@@ -110,6 +110,10 @@ func (h *StreamHandler) HandleDirectStream(c *gin.Context) {
 	filename := info.Name()
 	contentType := h.service.GetMimeType(filename)
 
+	if c.Query("download") == "true" {
+		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+	}
+
 	rangeHeader := c.GetHeader("Range")
 	var start, end int64 = 0, fileSize - 1
 	isRange := false
@@ -393,8 +397,9 @@ func (h *StreamHandler) HandleStream(c *gin.Context) {
 	fileSize := file.Length()
 	filename := file.DisplayPath()
 
-	// Check if raw mode (for transcoder loopback)
-	raw := c.Query("raw") == "true"
+	// Check if raw mode (for transcoder loopback) or download mode
+	download := c.Query("download") == "true"
+	raw := c.Query("raw") == "true" || download
 
 	contentType := h.service.GetMimeType(filename)
 	// For non-raw video requests, serve as fMP4 via TranscodeStream (remux: copy video, re-encode audio)
@@ -465,6 +470,9 @@ func (h *StreamHandler) HandleStream(c *gin.Context) {
 	contentType = h.service.GetMimeType(filename)
 
 	c.Header("Content-Type", contentType)
+	if download {
+		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filepath.Base(filename)))
+	}
 	c.Header("Accept-Ranges", "bytes")
 	c.Header("Content-Length", strconv.FormatInt(contentLength, 10))
 
