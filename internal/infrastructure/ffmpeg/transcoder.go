@@ -1,6 +1,7 @@
 package ffmpeg
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
@@ -230,10 +231,24 @@ func (t *Transcoder) TranscodeStream(ctx context.Context, w http.ResponseWriter,
 	return nil
 }
 
+// ReencodeProgress represents the progress of a reencoding job.
+type ReencodeProgress struct {
+	Percent float64 `json:"percent"`
+	Speed   string  `json:"speed"`
+	Time    string  `json:"time"`
+}
+
 // ReencodeToFile reencodes a video to a file with specific resolution and bitrate.
-func (t *Transcoder) ReencodeToFile(ctx context.Context, inputURL string, outputPath string, resolution string, bitrate string) error {
+func (t *Transcoder) ReencodeToFile(ctx context.Context, inputURL string, outputPath string, resolution string, bitrate string, onProgress func(ReencodeProgress)) error {
 	if t == nil {
 		return fmt.Errorf("transcoder not available")
+	}
+
+	// Get duration first for progress calculation
+	duration, err := t.GetVideoDurationFromURL(inputURL)
+	if err != nil {
+		log.Printf("⚠️ Could not get duration for progress: %v", err)
+		duration = 0
 	}
 
 	release, err := t.Acquire(ctx)
@@ -256,17 +271,57 @@ func (t *Transcoder) ReencodeToFile(ctx context.Context, inputURL string, output
 		"-c:a", "aac",
 		"-b:a", "128k",
 		"-movflags", "+faststart",
+		"-progress", "pipe:2", // Output progress to stderr
 		"-y", // Overwrite output file
 		outputPath,
 	}
 
 	cmd := exec.CommandContext(ctx, t.FFmpegPath, args...)
 
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("failed to get stderr: %w", err)
+	}
 
-	if err := cmd.Run(); err != nil {
-		log.Printf("❌ Reencode error output:\n%s", stderr.String())
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start ffmpeg: %w", err)
+	}
+
+	// Parse progress from stderr
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			line := scanner.Text()
+			// FFmpeg -progress output looks like:
+			// frame=  123
+			// fps= 12.3
+			// ...
+			// out_time_ms= 12345000
+			// speed= 1.23x
+			// progress=continue
+			if strings.HasPrefix(line, "out_time_ms=") {
+				msStr := strings.TrimPrefix(line, "out_time_ms=")
+				ms, _ := strconv.ParseInt(msStr, 10, 64)
+				if duration > 0 && ms > 0 {
+					percent := (float64(ms) / 1000000.0) / duration * 100.0
+					if percent > 100 {
+						percent = 100
+					}
+					if onProgress != nil {
+						onProgress(ReencodeProgress{
+							Percent: percent,
+							Time:    fmt.Sprintf("%.1fs", float64(ms)/1000000.0),
+						})
+					}
+				}
+			}
+			if strings.HasPrefix(line, "speed=") {
+				// Optionally capture speed
+			}
+		}
+	}()
+
+	if err := cmd.Wait(); err != nil {
 		return fmt.Errorf("reencode error: %w", err)
 	}
 

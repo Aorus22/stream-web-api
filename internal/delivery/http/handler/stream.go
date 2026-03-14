@@ -25,6 +25,15 @@ import (
 	"torrent-stream/pkg/srt"
 )
 
+type ReencodeJob struct {
+	ID         string                  `json:"id"` // infoHash or downloadId
+	Filename   string                  `json:"filename"`
+	Resolution string                  `json:"resolution"`
+	Bitrate    string                  `json:"bitrate"`
+	Progress   ffmpeg.ReencodeProgress `json:"progress"`
+	Status     string                  `json:"status"` // "processing", "completed", "failed"
+}
+
 // StreamHandler handles streaming requests.
 // Uses the shared Transcoder (with built-in FFmpeg pool) and
 // TorrentService (with built-in single-stream management) for all operations.
@@ -38,6 +47,9 @@ type StreamHandler struct {
 	// This is populated lazily when HandleHLSMasterPlaylist probes duration.
 	durationMu      sync.RWMutex
 	cachedDurations map[string]float64
+
+	// reencodeJobs tracks active reencoding jobs
+	reencodeJobs sync.Map // map[string]*ReencodeJob
 }
 
 // NewStreamHandler creates a new stream handler
@@ -708,6 +720,7 @@ func (h *StreamHandler) HandleReencode(c *gin.Context) {
 	var inputURL string
 	var filename string
 	var baseDir string
+	var jobID string
 
 	if req.InfoHash != "" {
 		// Torrent file
@@ -733,6 +746,7 @@ func (h *StreamHandler) HandleReencode(c *gin.Context) {
 		filename = file.DisplayPath()
 		inputURL = fmt.Sprintf("http://127.0.0.1:%d/stream/%s/%d?raw=true", h.service.GetPort(), req.InfoHash, req.FileIndex)
 		baseDir = filepath.Join(h.cacheDir, "exports", req.InfoHash)
+		jobID = fmt.Sprintf("torrent_%s_%d", req.InfoHash, req.FileIndex)
 
 		// Start download if not done
 		h.service.StartFileDownload(req.InfoHash, req.FileIndex)
@@ -751,6 +765,7 @@ func (h *StreamHandler) HandleReencode(c *gin.Context) {
 			inputURL = fmt.Sprintf("http://127.0.0.1:%d/stream/direct/%d?raw=true", h.service.GetPort(), req.DownloadID)
 		}
 		baseDir = filepath.Join(h.cacheDir, "exports", fmt.Sprintf("direct_%d", req.DownloadID))
+		jobID = fmt.Sprintf("direct_%d", req.DownloadID)
 	} else {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "infoHash or downloadId required"})
 		return
@@ -769,6 +784,16 @@ func (h *StreamHandler) HandleReencode(c *gin.Context) {
 	outName := fmt.Sprintf("%s_%s.mp4", nameWithoutExt, strings.ReplaceAll(req.Resolution, ":", "p"))
 	outputPath := filepath.Join(baseDir, outName)
 
+	// Create job
+	job := &ReencodeJob{
+		ID:         jobID,
+		Filename:   filename,
+		Resolution: req.Resolution,
+		Bitrate:    req.Bitrate,
+		Status:     "processing",
+	}
+	h.reencodeJobs.Store(jobID, job)
+
 	// Start reencoding in background
 	go func() {
 		log.Printf("🚀 Reencoding background job started for %s", filename)
@@ -776,13 +801,21 @@ func (h *StreamHandler) HandleReencode(c *gin.Context) {
 		ctx, cancel := context.WithTimeout(context.Background(), 24*time.Hour)
 		defer cancel()
 
-		err := h.transcoder.ReencodeToFile(ctx, inputURL, outputPath, req.Resolution, req.Bitrate)
+		err := h.transcoder.ReencodeToFile(ctx, inputURL, outputPath, req.Resolution, req.Bitrate, func(p ffmpeg.ReencodeProgress) {
+			job.Progress = p
+		})
+
 		if err != nil {
 			log.Printf("❌ Background reencode failed for %s: %v", filename, err)
-			// Maybe clean up partial file
+			job.Status = "failed"
+			// Keep failed job for a while or remove
+			time.AfterFunc(10*time.Minute, func() { h.reencodeJobs.Delete(jobID) })
 			os.Remove(outputPath)
 		} else {
 			log.Printf("✅ Background reencode complete: %s", outputPath)
+			job.Status = "completed"
+			job.Progress.Percent = 100
+			time.AfterFunc(5*time.Minute, func() { h.reencodeJobs.Delete(jobID) })
 		}
 	}()
 
@@ -790,6 +823,33 @@ func (h *StreamHandler) HandleReencode(c *gin.Context) {
 		"message":    "Reencoding started in background",
 		"outputPath": outputPath,
 	})
+}
+
+// HandleReencodeSSE handles GET /api/reencode/stream
+func (h *StreamHandler) HandleReencodeSSE(c *gin.Context) {
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("Transfer-Encoding", "chunked")
+	c.Writer.Flush()
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.Request.Context().Done():
+			return
+		case <-ticker.C:
+			var activeJobs []*ReencodeJob
+			h.reencodeJobs.Range(func(key, value interface{}) bool {
+				activeJobs = append(activeJobs, value.(*ReencodeJob))
+				return true
+			})
+			c.SSEvent("message", activeJobs)
+			c.Writer.Flush()
+		}
+	}
 }
 
 // HandleMediaInfo handles GET /api/metadata/:infoHash/:fileIndex
