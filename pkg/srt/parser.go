@@ -3,25 +3,28 @@ package srt
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"torrent-stream/internal/domain"
 )
 
-// ParseTimestamp converts SRT/VTT timestamp to seconds
+// ParseTimestamp converts SRT/VTT/ASS timestamp to seconds
 func ParseTimestamp(ts string) float64 {
-	// Format: 00:00:20,000 or 00:00:20.000
+	// Format could be:
+	// SRT/VTT: 00:00:20,000 or 00:00:20.000
+	// ASS: 0:00:20.00 (single digit hour)
+	
 	ts = strings.Replace(ts, ",", ".", 1)
 	parts := strings.Split(ts, ":")
 	if len(parts) != 3 {
 		return 0
 	}
-	h := 0.0
-	m := 0.0
-	s := 0.0
-	fmt.Sscanf(parts[0], "%f", &h)
-	fmt.Sscanf(parts[1], "%f", &m)
-	fmt.Sscanf(parts[2], "%f", &s)
+	
+	h, _ := strconv.ParseFloat(parts[0], 64)
+	m, _ := strconv.ParseFloat(parts[1], 64)
+	s, _ := strconv.ParseFloat(parts[2], 64)
+	
 	return h*3600 + m*60 + s
 }
 
@@ -32,9 +35,20 @@ func isNumeric(s string) bool {
 	return err == nil
 }
 
-// Parse converts SRT content to SubtitleCues
+// Parse converts SRT, VTT, or ASS content to SubtitleCues
 func Parse(srt []byte) []domain.SubtitleCue {
-	lines := strings.Split(string(srt), "\n")
+	content := string(srt)
+	
+	// Detect ASS format
+	if strings.Contains(content, "[Script Info]") || strings.Contains(content, "ScriptType: v4.00") {
+		return parseASS(content)
+	}
+
+	return parseSRT(content)
+}
+
+func parseSRT(content string) []domain.SubtitleCue {
+	lines := strings.Split(content, "\n")
 	var cues []domain.SubtitleCue
 
 	// Regex for SRT timing
@@ -88,5 +102,47 @@ func Parse(srt []byte) []domain.SubtitleCue {
 		cues = append(cues, *currentCue)
 	}
 
+	return cues
+}
+
+func parseASS(content string) []domain.SubtitleCue {
+	var cues []domain.SubtitleCue
+	lines := strings.Split(content, "\n")
+	
+	// Example ASS line:
+	// Dialogue: 0,0:00:10.50,0:00:13.20,Default,,0,0,0,,Text goes here
+	
+	// Regex to match ASS dialogue lines and extract start, end, and text
+	reDialogue := regexp.MustCompile(`^Dialogue:\s*[^,]+,\s*([^,]+)\s*,\s*([^,]+)\s*,.*?(?:,[^,]*){5},(.*)$`)
+	// Regex to strip ASS override tags like {\an8} or {\c&H0000FF&}
+	reOverrideTags := regexp.MustCompile(`\{[^}]*\}`)
+	
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "Dialogue:") {
+			continue
+		}
+		
+		matches := reDialogue.FindStringSubmatch(line)
+		if len(matches) == 4 {
+			start := ParseTimestamp(matches[1])
+			end := ParseTimestamp(matches[2])
+			
+			// Clean the text
+			text := matches[3]
+			text = reOverrideTags.ReplaceAllString(text, "")
+			text = strings.ReplaceAll(text, "\\N", "\n")
+			text = strings.ReplaceAll(text, "\\n", "\n")
+			
+			if strings.TrimSpace(text) != "" {
+				cues = append(cues, domain.SubtitleCue{
+					Start: start,
+					End:   end,
+					Text:  text,
+				})
+			}
+		}
+	}
+	
 	return cues
 }

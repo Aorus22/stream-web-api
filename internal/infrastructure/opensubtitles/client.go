@@ -1,8 +1,10 @@
 package opensubtitles
 
 import (
+	"crypto/tls"
 	"fmt"
 	"log"
+	"net/http"
 
 	"github.com/kolo/xmlrpc"
 
@@ -30,10 +32,14 @@ func NewClient() *Client {
 
 // Search searches for subtitles
 func (c *Client) Search(query, lang string) ([]domain.Subtitle, error) {
-	client, err := xmlrpc.NewClient(c.endpoint, nil)
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	client, err := xmlrpc.NewClient(c.endpoint, transport)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create XMLRPC client: %w", err)
 	}
+	_ = &http.Client{Transport: transport} // Keep for future use or just use transport directly
 
 	// Login
 	var loginResp map[string]interface{}
