@@ -31,7 +31,8 @@ type ReencodeJob struct {
 	Resolution string                  `json:"resolution"`
 	Bitrate    string                  `json:"bitrate"`
 	Progress   ffmpeg.ReencodeProgress `json:"progress"`
-	Status     string                  `json:"status"` // "processing", "completed", "failed"
+	Status     string                  `json:"status"` // "processing", "completed", "failed", "canceled"
+	cancel     context.CancelFunc      // internal use for canceling FFmpeg
 }
 
 // StreamHandler handles streaming requests.
@@ -68,6 +69,10 @@ func NewStreamHandler(service *torrentUC.Service, directService *directUC.Servic
 	})
 
 	return h
+}
+
+func (h *StreamHandler) GetReencodeJobs() *sync.Map {
+	return &h.reencodeJobs
 }
 
 // HandleDirectStream handles GET /stream/direct/:id
@@ -784,35 +789,39 @@ func (h *StreamHandler) HandleReencode(c *gin.Context) {
 	outName := fmt.Sprintf("%s_%s.mp4", nameWithoutExt, strings.ReplaceAll(req.Resolution, ":", "p"))
 	outputPath := filepath.Join(baseDir, outName)
 
-	// Create job
+	// Create job with cancelable context
+	ctx, cancel := context.WithCancel(context.Background())
 	job := &ReencodeJob{
 		ID:         jobID,
 		Filename:   filename,
 		Resolution: req.Resolution,
 		Bitrate:    req.Bitrate,
 		Status:     "processing",
+		cancel:     cancel,
 	}
 	h.reencodeJobs.Store(jobID, job)
 
 	// Start reencoding in background
 	go func() {
-		log.Printf("🚀 Reencoding background job started for %s", filename)
-		// Use a long timeout for background reencoding
-		ctx, cancel := context.WithTimeout(context.Background(), 24*time.Hour)
-		defer cancel()
-
+		log.Printf("🚀 [Reencode] Job started for %s (Res: %s, ID: %s)", filename, req.Resolution, jobID)
+		
 		err := h.transcoder.ReencodeToFile(ctx, inputURL, outputPath, req.Resolution, req.Bitrate, func(p ffmpeg.ReencodeProgress) {
 			job.Progress = p
 		})
 
 		if err != nil {
-			log.Printf("❌ Background reencode failed for %s: %v", filename, err)
-			job.Status = "failed"
-			// Keep failed job for a while or remove
+			if ctx.Err() == context.Canceled {
+				log.Printf("🛑 [Reencode] Job canceled by user: %s", filename)
+				job.Status = "canceled"
+			} else {
+				log.Printf("❌ [Reencode] Job failed for %s: %v", filename, err)
+				job.Status = "failed"
+			}
+			// Cleanup after some time
 			time.AfterFunc(10*time.Minute, func() { h.reencodeJobs.Delete(jobID) })
 			os.Remove(outputPath)
 		} else {
-			log.Printf("✅ Background reencode complete: %s", outputPath)
+			log.Printf("✅ [Reencode] Job completed: %s -> %s", filename, outputPath)
 			job.Status = "completed"
 			job.Progress.Percent = 100
 			time.AfterFunc(5*time.Minute, func() { h.reencodeJobs.Delete(jobID) })
@@ -823,6 +832,29 @@ func (h *StreamHandler) HandleReencode(c *gin.Context) {
 		"message":    "Reencoding started in background",
 		"outputPath": outputPath,
 	})
+}
+
+// HandleCancelReencode handles POST /api/reencode/cancel
+func (h *StreamHandler) HandleCancelReencode(c *gin.Context) {
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		return
+	}
+
+	if val, ok := h.reencodeJobs.Load(req.ID); ok {
+		job := val.(*ReencodeJob)
+		if job.cancel != nil {
+			job.cancel()
+			log.Printf("📥 [Reencode] Received cancel request for ID: %s", req.ID)
+			c.JSON(http.StatusOK, gin.H{"message": "Reencode job cancel requested"})
+			return
+		}
+	}
+
+	c.JSON(http.StatusNotFound, gin.H{"error": "Job not found or already finished"})
 }
 
 // HandleReencodeSSE handles GET /api/reencode/stream

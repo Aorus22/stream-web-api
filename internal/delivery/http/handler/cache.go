@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -8,12 +9,26 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
+	"torrent-stream/internal/infrastructure/gdrive"
+	"torrent-stream/internal/domain"
 	"torrent-stream/internal/usecase/direct"
 	"torrent-stream/internal/usecase/torrent"
 
 	"github.com/gin-gonic/gin"
 )
+
+type GDriveJob struct {
+	ID       string             `json:"id"`
+	Filename string             `json:"filename"`
+	Status   string             `json:"status"` // uploading, completed, failed, canceled
+	Progress float64            `json:"progress"`
+	Link     string             `json:"link,omitempty"`
+	Error    string             `json:"error,omitempty"`
+	cancel   context.CancelFunc // internal
+}
 
 // CacheHandler handles cache-related requests
 type CacheHandler struct {
@@ -22,16 +37,68 @@ type CacheHandler struct {
 	hlsCacheDir    string
 	torrentService *torrent.Service
 	directService  *direct.Service
+	gdriveClient   *gdrive.Client
+	gdriveJobs     sync.Map // map[string]*GDriveJob
+	// We'll link reencodeJobs here to merge SSE
+	reencodeJobs *sync.Map
 }
 
 // NewCacheHandler creates a new cache handler
-func NewCacheHandler(cacheDir string, directCacheDir string, hlsCacheDir string, torrentService *torrent.Service, directService *direct.Service) *CacheHandler {
+func NewCacheHandler(cacheDir string, directCacheDir string, hlsCacheDir string, torrentService *torrent.Service, directService *direct.Service, gdriveClient *gdrive.Client) *CacheHandler {
 	return &CacheHandler{
 		cacheDir:       cacheDir,
 		directCacheDir: directCacheDir,
 		hlsCacheDir:    hlsCacheDir,
 		torrentService: torrentService,
 		directService:  directService,
+		gdriveClient:   gdriveClient,
+	}
+}
+
+func (h *CacheHandler) SetReencodeJobs(m *sync.Map) {
+	h.reencodeJobs = m
+}
+
+// HandleTasksSSE handles GET /api/tasks/stream (Merged Reencode + GDrive)
+func (h *CacheHandler) HandleTasksSSE(c *gin.Context) {
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("Transfer-Encoding", "chunked")
+	c.Writer.Flush()
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.Request.Context().Done():
+			return
+		case <-ticker.C:
+			gdriveActive := make([]*GDriveJob, 0)
+			h.gdriveJobs.Range(func(key, value interface{}) bool {
+				if job, ok := value.(*GDriveJob); ok {
+					gdriveActive = append(gdriveActive, job)
+				}
+				return true
+			})
+
+			reencodeActive := make([]interface{}, 0)
+			if h.reencodeJobs != nil {
+				h.reencodeJobs.Range(func(key, value interface{}) bool {
+					if value != nil {
+						reencodeActive = append(reencodeActive, value)
+					}
+					return true
+				})
+			}
+
+			c.SSEvent("message", gin.H{
+				"gdrive":   gdriveActive,
+				"reencode": reencodeActive,
+			})
+			c.Writer.Flush()
+		}
 	}
 }
 
@@ -111,6 +178,10 @@ func (h *CacheHandler) HandleListCachedFiles(c *gin.Context) {
 		if info.IsDir() {
 			// Don't treat direct downloads as magnet cache
 			if h.directCacheDir != "" && filepath.Clean(path) == filepath.Clean(h.directCacheDir) {
+				return filepath.SkipDir
+			}
+			// Don't treat exports folder as magnet cache
+			if filepath.Base(path) == "exports" {
 				return filepath.SkipDir
 			}
 			return nil
@@ -241,10 +312,10 @@ func (h *CacheHandler) HandleListCachedFiles(c *gin.Context) {
 			Name:      info.Name(),
 			Path:      "exports/" + relPath,
 			Size:      info.Size(),
-			Type:      "direct",
+			Type:      "export",
 			Status:    "completed",
-			StreamURL: "/api/exports/" + relPath, // New endpoint needed
-			CanPlay:   false,                      // As requested "ga bisa di stream kayak yang normal"
+			StreamURL: "/api/exports/" + relPath,
+			CanPlay:   false,
 		})
 		return nil
 	})
@@ -350,6 +421,214 @@ func (h *CacheHandler) HandleListCachedFiles(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, cachedFiles)
+}
+
+// HandleGDriveUpload handles POST /api/gdrive/upload
+func (h *CacheHandler) HandleGDriveUpload(c *gin.Context) {
+	if h.gdriveClient == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Google Drive integration not configured"})
+		return
+	}
+
+	var req struct {
+		InfoHash   string `json:"infoHash"`
+		FileIndex  int    `json:"fileIndex"`
+		DownloadID int    `json:"downloadId"`
+		ExportPath string `json:"exportPath"` // For reencoded files
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		return
+	}
+
+	var filePath string
+	var filename string
+	var jobID string
+
+	if req.ExportPath != "" {
+		// Handle reencoded files (exports)
+		// relPath expected like "exports/infoHash/file.mp4"
+		cleanPath := filepath.Clean(strings.TrimPrefix(req.ExportPath, "/"))
+		filePath = filepath.Join(h.cacheDir, cleanPath)
+		filename = filepath.Base(filePath)
+		jobID = "export_" + cleanPath
+	} else if req.InfoHash != "" {
+		// Handle torrent files
+		t := h.torrentService.GetTorrent(req.InfoHash)
+		if t == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Torrent session not active. If it was completed, it should be in the library."})
+			return
+		}
+
+		// Try to find the file index
+		torrents := h.torrentService.ListTorrents()
+		var foundFile domain.File
+		var torrentName string
+		for _, torrentStat := range torrents {
+			if torrentStat.InfoHash == req.InfoHash {
+				torrentName = torrentStat.Name
+				for _, f := range torrentStat.Files {
+					if f.Index == req.FileIndex {
+						foundFile = f
+						break
+					}
+				}
+				break
+			}
+		}
+
+		if foundFile.Name == "" {
+			c.JSON(http.StatusNotFound, gin.H{"error": "File not found in torrent"})
+			return
+		}
+
+		filename = foundFile.Name
+		jobID = fmt.Sprintf("torrent_%s_%d", req.InfoHash, req.FileIndex)
+		
+		// Search for the file on disk in cacheDir
+		candidates := []string{
+			filepath.Join(h.cacheDir, torrentName, filename),
+			filepath.Join(h.cacheDir, filename),
+			filepath.Join(h.cacheDir, req.InfoHash, filename),
+		}
+
+		for _, path := range candidates {
+			if _, err := os.Stat(path); err == nil {
+				filePath = path
+				break
+			}
+		}
+
+		// Brute force search if not found
+		if filePath == "" {
+			_ = filepath.Walk(h.cacheDir, func(path string, info os.FileInfo, err error) error {
+				if err == nil && !info.IsDir() && info.Name() == filepath.Base(filename) {
+					filePath = path
+					return filepath.SkipDir // Found it
+				}
+				return nil
+			})
+		}
+	} else if req.DownloadID != 0 {
+		// Handle direct downloads
+		downloads, err := h.directService.ListDownloads()
+		if err == nil {
+			for _, dl := range downloads {
+				if dl.ID == req.DownloadID {
+					filePath = dl.FilePath
+					filename = dl.Filename
+					jobID = fmt.Sprintf("direct_%d", req.DownloadID)
+					break
+				}
+			}
+		}
+	}
+
+	if filePath == "" {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error": "File path could not be resolved",
+			"debug": fmt.Sprintf("req: %+v, cacheDir: %s", req, h.cacheDir),
+		})
+		return
+	}
+
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error": "File not found on disk",
+			"path":  filePath,
+		})
+		return
+	}
+
+	// Create job with cancelable context
+	ctx, cancel := context.WithCancel(context.Background())
+	job := &GDriveJob{
+		ID:       jobID,
+		Filename: filename,
+		Status:   "uploading",
+		cancel:   cancel,
+	}
+	h.gdriveJobs.Store(jobID, job)
+
+	// Start upload in background
+	go func() {
+		log.Printf("☁️ [GDrive] Upload started: %s (ID: %s)", filename, jobID)
+		
+		_, link, err := h.gdriveClient.Upload(ctx, filePath, filename, func(p float64) {
+			job.Progress = p
+		})
+
+		if err != nil {
+			if ctx.Err() == context.Canceled {
+				log.Printf("🛑 [GDrive] Upload canceled by user: %s", filename)
+				job.Status = "canceled"
+			} else {
+				log.Printf("❌ [GDrive] Upload failed for %s: %v", filename, err)
+				job.Status = "failed"
+				job.Error = err.Error()
+			}
+			time.AfterFunc(10*time.Minute, func() { h.gdriveJobs.Delete(jobID) })
+		} else {
+			log.Printf("✅ [GDrive] Upload success: %s -> %s", filename, link)
+			job.Status = "completed"
+			job.Progress = 100
+			job.Link = link
+			time.AfterFunc(5*time.Minute, func() { h.gdriveJobs.Delete(jobID) })
+		}
+	}()
+
+	c.JSON(http.StatusOK, gin.H{"message": "Upload started in background", "resolvedPath": filePath})
+}
+
+// HandleCancelGDrive handles POST /api/gdrive/cancel
+func (h *CacheHandler) HandleCancelGDrive(c *gin.Context) {
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		return
+	}
+
+	if val, ok := h.gdriveJobs.Load(req.ID); ok {
+		job := val.(*GDriveJob)
+		if job.cancel != nil {
+			job.cancel()
+			log.Printf("📥 [GDrive] Received cancel request for ID: %s", req.ID)
+			c.JSON(http.StatusOK, gin.H{"message": "GDrive upload cancel requested"})
+			return
+		}
+	}
+
+	c.JSON(http.StatusNotFound, gin.H{"error": "Job not found or already finished"})
+}
+
+// HandleGDriveSSE handles GET /api/gdrive/stream
+func (h *CacheHandler) HandleGDriveSSE(c *gin.Context) {
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("Transfer-Encoding", "chunked")
+	c.Writer.Flush()
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.Request.Context().Done():
+			return
+		case <-ticker.C:
+			var activeJobs []*GDriveJob
+			h.gdriveJobs.Range(func(key, value interface{}) bool {
+				activeJobs = append(activeJobs, value.(*GDriveJob))
+				return true
+			})
+			c.SSEvent("message", activeJobs)
+			c.Writer.Flush()
+		}
+	}
 }
 
 // HandleDeleteCachedFile handles DELETE /api/cache/:infoHash

@@ -10,6 +10,7 @@ import (
 	"torrent-stream/internal/infrastructure/cinemeta"
 	"torrent-stream/internal/infrastructure/database"
 	"torrent-stream/internal/infrastructure/ffmpeg"
+	"torrent-stream/internal/infrastructure/gdrive"
 	"torrent-stream/internal/infrastructure/opensubtitles"
 	"torrent-stream/internal/infrastructure/persistence"
 	"torrent-stream/internal/infrastructure/torrent"
@@ -49,6 +50,16 @@ func main() {
 		log.Fatalf("Failed to init torrent client: %v", err)
 	}
 	defer torrentClient.Close()
+
+	// GDrive Client
+	gdriveClientID := os.Getenv("GDRIVE_CLIENT_ID")
+	gdriveClientSecret := os.Getenv("GDRIVE_CLIENT_SECRET")
+	gdriveRefreshToken := os.Getenv("GDRIVE_REFRESH_TOKEN")
+	var gdriveClient *gdrive.Client
+	if gdriveClientID != "" && gdriveClientSecret != "" && gdriveRefreshToken != "" {
+		gdriveClient = gdrive.NewClient(gdriveClientID, gdriveClientSecret, gdriveRefreshToken)
+		log.Println("✅ Google Drive integration enabled")
+	}
 
 	transcoder := ffmpeg.NewTranscoder()
 	if transcoder == nil {
@@ -92,11 +103,12 @@ func main() {
 
 	// 3. Handlers
 	torrentHandler := handler.NewTorrentHandler(torrentService, scriptExecutorService, customProviderRepo)
-	streamHandler := handler.NewStreamHandler(torrentService, directService, transcoder, hlsCacheDir)
+	streamHandler := handler.NewStreamHandler(torrentService, directService, transcoder, cacheDir)
 	subtitleHandler := handler.NewSubtitleHandler(subtitleService)
 	autosyncHandler := handler.NewAutoSyncHandler(autosyncService, subtitleService, port)
 	catalogHandler := handler.NewCatalogHandler(cinemetaClient)
-	cacheHandler := handler.NewCacheHandler(cacheDir, directCacheDir, hlsCacheDir, torrentService, directService)
+	cacheHandler := handler.NewCacheHandler(cacheDir, directCacheDir, hlsCacheDir, torrentService, directService, gdriveClient)
+	cacheHandler.SetReencodeJobs(streamHandler.GetReencodeJobs())
 	directHandler := handler.NewDirectDownloadHandler(directService)
 	scriptExecutorHandler := handler.NewScriptExecutorHandler(scriptExecutorService)
 	customProviderHandler := handler.NewCustomProviderHandler(customProviderService)
