@@ -51,9 +51,10 @@ func parseSRT(content string) []domain.SubtitleCue {
 	lines := strings.Split(content, "\n")
 	var cues []domain.SubtitleCue
 
-	// Regex for SRT timing
 	reTiming := regexp.MustCompile(`(\d{2}:\d{2}:\d{2}[,.]\d{3}) --> (\d{2}:\d{2}:\d{2}[,.]\d{3})`)
-	reTags := regexp.MustCompile(`<[^>]*>`)
+	reHtmlTags := regexp.MustCompile(`<[^>]*>`)
+	reAssTags := regexp.MustCompile(`\{[^}]*\}`)
+	reAlignTag := regexp.MustCompile(`\\an(\d)`)
 
 	var currentCue *domain.SubtitleCue
 
@@ -67,7 +68,6 @@ func parseSRT(content string) []domain.SubtitleCue {
 			continue
 		}
 
-		// Skip index numbers if strictly numeric and short
 		if isNumeric(line) && len(line) < 5 && currentCue == nil {
 			continue
 		}
@@ -88,8 +88,22 @@ func parseSRT(content string) []domain.SubtitleCue {
 			}
 		} else {
 			if currentCue != nil {
-				// Strip tags
-				cleanLine := reTags.ReplaceAllString(line, "")
+				if currentCue.Position == "" {
+					alignMatch := reAlignTag.FindStringSubmatch(line)
+					if len(alignMatch) == 2 {
+						n, _ := strconv.Atoi(alignMatch[1])
+						switch {
+						case n >= 1 && n <= 3:
+							currentCue.Position = "bottom"
+						case n >= 4 && n <= 6:
+							currentCue.Position = "middle"
+						case n >= 7 && n <= 9:
+							currentCue.Position = "top"
+						}
+					}
+				}
+				cleanLine := reAssTags.ReplaceAllString(line, "")
+				cleanLine = reHtmlTags.ReplaceAllString(cleanLine, "")
 				if currentCue.Text != "" {
 					currentCue.Text += "\n" + cleanLine
 				} else {
