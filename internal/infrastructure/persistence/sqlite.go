@@ -49,6 +49,12 @@ func NewTorrentRepository(cacheDir string) (*TorrentRepository, error) {
 		completed_at DATETIME,
 		file_path TEXT
 	);
+
+	CREATE TABLE IF NOT EXISTS torrent_metadata (
+		info_hash TEXT PRIMARY KEY,
+		metadata_json TEXT NOT NULL,
+		created_at DATETIME
+	);
 	`
 	if _, err := db.Exec(query); err != nil {
 		return nil, err
@@ -99,6 +105,26 @@ func (r *TorrentRepository) List() ([]ActiveTorrent, error) {
 		torrents = append(torrents, t)
 	}
 	return torrents, nil
+}
+
+// SaveMetadata saves torrent metadata JSON keyed by infoHash
+func (r *TorrentRepository) SaveMetadata(infoHash, metadataJSON string) error {
+	query := `
+	INSERT OR REPLACE INTO torrent_metadata (info_hash, metadata_json, created_at)
+	VALUES (?, ?, ?)
+	`
+	_, err := r.db.Exec(query, infoHash, metadataJSON, time.Now())
+	return err
+}
+
+// GetMetadata retrieves metadata JSON by infoHash. Returns ("", nil) if not found.
+func (r *TorrentRepository) GetMetadata(infoHash string) (string, error) {
+	var jsonStr string
+	err := r.db.QueryRow(`SELECT metadata_json FROM torrent_metadata WHERE info_hash = ?`, infoHash).Scan(&jsonStr)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return jsonStr, err
 }
 
 // Close closes the database connection

@@ -80,6 +80,7 @@ func (s *Server) Start() error {
 	r.DELETE("/api/torrents/all", s.torrentHandler.HandleRemoveAll)
 	r.GET("/api/torrents/stream", s.torrentHandler.HandleAllTorrentsSSE)
 	r.GET("/api/stats/:infoHash/stream", s.torrentHandler.HandleStatsSSE)
+	r.GET("/api/torrent/metadata/:infoHash", s.torrentHandler.HandleGetMetadata)
 
 	// Stream routes
 	r.GET("/stream/:infoHash/:fileIndex", s.streamHandler.HandleStream)

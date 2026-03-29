@@ -846,6 +846,16 @@ func (c *Client) UpdatePlaybackDuration(infoHash string, fileIndex int, duration
 	}
 }
 
+// SaveMetadata persists metadata JSON for a torrent
+func (c *Client) SaveMetadata(infoHash, metadataJSON string) error {
+	return c.repo.SaveMetadata(infoHash, metadataJSON)
+}
+
+// GetMetadata retrieves metadata JSON for a torrent. Returns ("", nil) if not found.
+func (c *Client) GetMetadata(infoHash string) (string, error) {
+	return c.repo.GetMetadata(infoHash)
+}
+
 // Helper for port string
 func getPortStr(port int) string {
 	if port == 0 {

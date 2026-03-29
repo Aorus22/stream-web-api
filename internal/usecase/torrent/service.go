@@ -116,6 +116,16 @@ type ProviderInfo struct {
 	PageType string `json:"pageType"`
 }
 
+// SaveMetadata persists metadata JSON for a torrent
+func (s *Service) SaveMetadata(infoHash, metadataJSON string) error {
+	return s.client.SaveMetadata(infoHash, metadataJSON)
+}
+
+// GetMetadata retrieves metadata JSON for a torrent
+func (s *Service) GetMetadata(infoHash string) (string, error) {
+	return s.client.GetMetadata(infoHash)
+}
+
 // GetHardcodedProviders returns hardcoded providers
 func (s *Service) GetHardcodedProviders() []string {
 	return infra.GetProviders()

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/base64"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -38,10 +39,21 @@ func (h *TorrentHandler) HandleAddMagnet(c *gin.Context) {
 		return
 	}
 
+	metadata := c.PostForm("metadata")
+
 	stats, err := h.service.AddMagnet(magnet)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+
+	if metadata != "" {
+		infoHash := stats.InfoHash
+		if infoHash != "" {
+			if saveErr := h.service.SaveMetadata(infoHash, metadata); saveErr != nil {
+				log.Printf("⚠️ Failed to save metadata for %s: %v", infoHash, saveErr)
+			}
+		}
 	}
 
 	c.JSON(http.StatusOK, stats)
@@ -367,12 +379,31 @@ func (h *TorrentHandler) HandleStatsSSE(c *gin.Context) {
 		case <-ticker.C:
 			stats, err := h.service.GetStats(infoHash)
 			if err != nil {
-				// If torrent is gone, maybe stop? For now just keep trying or send empty?
-				// Sending error event could be useful
 				continue
 			}
 			c.SSEvent("message", stats)
 			c.Writer.Flush()
 		}
 	}
+}
+
+// HandleGetMetadata handles GET /api/torrent/metadata/:infoHash
+func (h *TorrentHandler) HandleGetMetadata(c *gin.Context) {
+	infoHash := c.Param("infoHash")
+	if infoHash == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Info hash required"})
+		return
+	}
+
+	jsonStr, err := h.service.GetMetadata(infoHash)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if jsonStr == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "No metadata found"})
+		return
+	}
+
+	c.Data(http.StatusOK, "application/json; charset=utf-8", []byte(jsonStr))
 }
