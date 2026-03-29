@@ -13,9 +13,10 @@ type Subtitle struct {
 
 // SubtitleCue represents a single subtitle cue with timing
 type SubtitleCue struct {
-	Start float64 `json:"start"`
-	End   float64 `json:"end"`
-	Text  string  `json:"text"`
+	Start    float64 `json:"start"`
+	End      float64 `json:"end"`
+	Text     string  `json:"text"`
+	Position string  `json:"position,omitempty"`
 }
 
 // AutoSyncRequest represents a request for auto-sync

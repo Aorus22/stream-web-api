@@ -114,8 +114,8 @@ func parseASS(content string) []domain.SubtitleCue {
 	
 	// Regex to match ASS dialogue lines and extract start, end, and text
 	reDialogue := regexp.MustCompile(`^Dialogue:\s*[^,]+,\s*([^,]+)\s*,\s*([^,]+)\s*,.*?(?:,[^,]*){5},(.*)$`)
-	// Regex to strip ASS override tags like {\an8} or {\c&H0000FF&}
 	reOverrideTags := regexp.MustCompile(`\{[^}]*\}`)
+	reAlignTag := regexp.MustCompile(`\\an(\d)`)
 	
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -128,17 +128,32 @@ func parseASS(content string) []domain.SubtitleCue {
 			start := ParseTimestamp(matches[1])
 			end := ParseTimestamp(matches[2])
 			
-			// Clean the text
 			text := matches[3]
+
+			position := ""
+			alignMatch := reAlignTag.FindStringSubmatch(text)
+			if len(alignMatch) == 2 {
+				n, _ := strconv.Atoi(alignMatch[1])
+				switch {
+				case n >= 1 && n <= 3:
+					position = "bottom"
+				case n >= 4 && n <= 6:
+					position = "middle"
+				case n >= 7 && n <= 9:
+					position = "top"
+				}
+			}
+
 			text = reOverrideTags.ReplaceAllString(text, "")
 			text = strings.ReplaceAll(text, "\\N", "\n")
 			text = strings.ReplaceAll(text, "\\n", "\n")
 			
 			if strings.TrimSpace(text) != "" {
 				cues = append(cues, domain.SubtitleCue{
-					Start: start,
-					End:   end,
-					Text:  text,
+					Start:    start,
+					End:      end,
+					Text:     text,
+					Position: position,
 				})
 			}
 		}
