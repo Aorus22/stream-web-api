@@ -77,3 +77,15 @@ func LoadGDriveConfig() *GDriveConfig {
 func (g *GDriveConfig) IsConfigured() bool {
 	return g.ClientID != "" && g.ClientSecret != "" && g.RefreshToken != ""
 }
+
+type OpenSubtitleConfig struct {
+	IsProxy  bool
+	ProxyURL string
+}
+
+func LoadOpenSubtitleConfig() *OpenSubtitleConfig {
+	return &OpenSubtitleConfig{
+		IsProxy:  os.Getenv("IS_PROXY_OPENSUBTITLE") == "true",
+		ProxyURL: os.Getenv("PROXY_OPENSUBTITLE_URL"),
+	}
+}

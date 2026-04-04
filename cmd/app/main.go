@@ -39,7 +39,8 @@ func main() {
 		log.Println("Warning: Transcoder initialization failed (FFmpeg not found?)")
 	}
 
-	opensubtitlesClient := infra.NewOpenSubtitlesClient()
+	osConfig := config.LoadOpenSubtitleConfig()
+	opensubtitlesClient := infra.NewOpenSubtitlesClient(osConfig)
 	cinemetaClient := infra.NewCinemetaClient()
 	subtitleDownloader := infra.NewSubtitleDownloader()
 	luaExecutor := infra.NewLuaExecutor()
