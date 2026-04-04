@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"stream-web-api/internal/delivery/http/handler"
+	"stream-web-api/internal/delivery/sse"
 )
 
 type Server struct {
@@ -20,6 +21,7 @@ type Server struct {
 	directHandler         *handler.DirectDownloadHandler
 	scriptExecutorHandler *handler.ScriptExecutorHandler
 	customProviderHandler *handler.CustomProviderHandler
+	sseHandler            *sse.Handler
 }
 
 func NewServer(
@@ -33,6 +35,7 @@ func NewServer(
 	directHandler *handler.DirectDownloadHandler,
 	scriptExecutorHandler *handler.ScriptExecutorHandler,
 	customProviderHandler *handler.CustomProviderHandler,
+	sseHandler *sse.Handler,
 ) *Server {
 	return &Server{
 		port:                  port,
@@ -45,6 +48,7 @@ func NewServer(
 		directHandler:         directHandler,
 		scriptExecutorHandler: scriptExecutorHandler,
 		customProviderHandler: customProviderHandler,
+		sseHandler:            sseHandler,
 	}
 }
 

@@ -29,8 +29,8 @@ func SetupRouter(s *Server) *gin.Engine {
 	r.GET("/api/pieces/:infoHash/:fileIndex", s.torrentHandler.HandlePieceInfo)
 	r.DELETE("/api/remove/:infoHash", s.torrentHandler.HandleRemove)
 	r.DELETE("/api/torrents/all", s.torrentHandler.HandleRemoveAll)
-	r.GET("/api/torrents/stream", s.torrentHandler.HandleAllTorrentsSSE)
-	r.GET("/api/stats/:infoHash/stream", s.torrentHandler.HandleStatsSSE)
+	r.GET("/api/torrents/stream", s.sseHandler.HandleAllTorrentsSSE)
+	r.GET("/api/stats/:infoHash/stream", s.sseHandler.HandleStatsSSE)
 	r.GET("/api/torrent/metadata/:infoHash", s.torrentHandler.HandleGetMetadata)
 
 	r.GET("/stream/:infoHash/:fileIndex", s.streamHandler.HandleStream)
@@ -39,7 +39,7 @@ func SetupRouter(s *Server) *gin.Engine {
 	r.POST("/api/reencode/cancel", s.streamHandler.HandleCancelReencode)
 	r.POST("/api/gdrive/upload", s.cacheHandler.HandleGDriveUpload)
 	r.POST("/api/gdrive/cancel", s.cacheHandler.HandleCancelGDrive)
-	r.GET("/api/tasks/stream", s.cacheHandler.HandleTasksSSE)
+	r.GET("/api/tasks/stream", s.sseHandler.HandleTasksSSE)
 	r.GET("/api/duration/:infoHash/:fileIndex", s.streamHandler.HandleDuration)
 	r.GET("/api/metadata/:infoHash/:fileIndex", s.streamHandler.HandleMediaInfo)
 	r.GET("/api/stream/:infoHash/:fileIndex/sub/:streamIndex", s.streamHandler.HandleStreamSubtitle)
@@ -71,10 +71,10 @@ func SetupRouter(s *Server) *gin.Engine {
 
 	r.POST("/api/direct/add", s.directHandler.HandleAddDirectDownload)
 	r.GET("/api/direct", s.directHandler.HandleListDirectDownloads)
-	r.GET("/api/direct/stream", s.directHandler.HandleAllDirectDownloadsSSE)
+	r.GET("/api/direct/stream", s.sseHandler.HandleAllDirectDownloadsSSE)
 	r.GET("/api/direct/:id", s.directHandler.HandleGetDirectDownload)
 	r.DELETE("/api/direct/:id", s.directHandler.HandleDeleteDirectDownload)
-	r.GET("/api/direct/:id/progress", s.directHandler.HandleDirectDownloadProgress)
+	r.GET("/api/direct/:id/progress", s.sseHandler.HandleDirectDownloadProgress)
 	r.DELETE("/api/direct/all", s.directHandler.HandleDirectDownloadAll)
 
 	r.GET("/stream/direct/:id", s.streamHandler.HandleDirectStream)

@@ -427,28 +427,6 @@ func (h *StreamHandler) HandleCancelReencode(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Reencode job cancel requested"})
 }
 
-func (h *StreamHandler) HandleReencodeSSE(c *gin.Context) {
-	c.Header("Content-Type", "text/event-stream")
-	c.Header("Cache-Control", "no-cache")
-	c.Header("Connection", "keep-alive")
-	c.Header("Transfer-Encoding", "chunked")
-	c.Writer.Flush()
-
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-c.Request.Context().Done():
-			return
-		case <-ticker.C:
-			jobs := h.streamService.GetReencodeJobs()
-			c.SSEvent("message", jobs)
-			c.Writer.Flush()
-		}
-	}
-}
-
 func (h *StreamHandler) HandleMediaInfo(c *gin.Context) {
 	infoHash := c.Param("infoHash")
 	fileIndex, err := strconv.Atoi(c.Param("fileIndex"))
@@ -569,10 +547,6 @@ func (h *StreamHandler) HandleHLSSegment(c *gin.Context) {
 		os.Remove(cachePath)
 		return
 	}
-}
-
-func (h *StreamHandler) GetReencodeJobs() []model.ReencodeJobStatus {
-	return h.streamService.GetReencodeJobs()
 }
 
 func (h *StreamHandler) copyWithTimeout(w io.Writer, r io.Reader, length int64, ctx context.Context) {

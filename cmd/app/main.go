@@ -6,6 +6,7 @@ import (
 	"stream-web-api/internal/config"
 	"stream-web-api/internal/delivery/http"
 	"stream-web-api/internal/delivery/http/handler"
+	"stream-web-api/internal/delivery/sse"
 	"stream-web-api/internal/domain/usecase"
 	infra "stream-web-api/internal/infrastructure/repository"
 )
@@ -39,7 +40,8 @@ func main() {
 		log.Println("Warning: Transcoder initialization failed (FFmpeg not found?)")
 	}
 
-	opensubtitlesClient := infra.NewOpenSubtitlesClient()
+	osConfig := config.LoadOpenSubtitleConfig()
+	opensubtitlesClient := infra.NewOpenSubtitlesClient(osConfig)
 	cinemetaClient := infra.NewCinemetaClient()
 	subtitleDownloader := infra.NewSubtitleDownloader()
 	luaExecutor := infra.NewLuaExecutor()
@@ -84,6 +86,8 @@ func main() {
 	scriptExecutorHandler := handler.NewScriptExecutorHandler(scriptExecutorService)
 	customProviderHandler := handler.NewCustomProviderHandler(customProviderService)
 
+	sseHandler := sse.NewHandler(torrentService, directService, streamService, cacheService)
+
 	server := http.NewServer(
 		cfg.Port,
 		torrentHandler,
@@ -95,6 +99,7 @@ func main() {
 		directHandler,
 		scriptExecutorHandler,
 		customProviderHandler,
+		sseHandler,
 	)
 
 	if err := server.Start(); err != nil {

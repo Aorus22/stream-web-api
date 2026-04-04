@@ -3,7 +3,6 @@ package handler
 import (
 	"net/http"
 	"path/filepath"
-	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -18,28 +17,6 @@ type CacheHandler struct {
 
 func NewCacheHandler(service *uc.CacheUsecase) *CacheHandler {
 	return &CacheHandler{service: service}
-}
-
-func (h *CacheHandler) HandleTasksSSE(c *gin.Context) {
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
-	c.Writer.Header().Set("Transfer-Encoding", "chunked")
-	c.Writer.Flush()
-
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-c.Request.Context().Done():
-			return
-		case <-ticker.C:
-			event := h.service.GetTasksEvent()
-			c.SSEvent("message", event)
-			c.Writer.Flush()
-		}
-	}
 }
 
 func (h *CacheHandler) HandleListCachedFiles(c *gin.Context) {
@@ -94,28 +71,6 @@ func (h *CacheHandler) HandleCancelGDrive(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "GDrive upload cancel requested"})
-}
-
-func (h *CacheHandler) HandleGDriveSSE(c *gin.Context) {
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
-	c.Writer.Header().Set("Transfer-Encoding", "chunked")
-	c.Writer.Flush()
-
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-c.Request.Context().Done():
-			return
-		case <-ticker.C:
-			event := h.service.GetTasksEvent()
-			c.SSEvent("message", event)
-			c.Writer.Flush()
-		}
-	}
 }
 
 func (h *CacheHandler) HandleDeleteCachedFile(c *gin.Context) {

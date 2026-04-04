@@ -3,7 +3,6 @@ package handler
 import (
 	"net/http"
 	"strconv"
-	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -165,69 +164,6 @@ func (h *TorrentHandler) HandleSearchCustomDetail(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, result)
-}
-
-func (h *TorrentHandler) HandleAllTorrentsSSE(c *gin.Context) {
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
-	c.Writer.Header().Set("Transfer-Encoding", "chunked")
-	c.Writer.Flush()
-
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
-	stats := h.service.ListTorrents()
-	c.SSEvent("message", stats)
-	c.Writer.Flush()
-
-	for {
-		select {
-		case <-c.Request.Context().Done():
-			return
-		case <-ticker.C:
-			stats := h.service.ListTorrents()
-			c.SSEvent("message", stats)
-			c.Writer.Flush()
-		}
-	}
-}
-
-func (h *TorrentHandler) HandleStatsSSE(c *gin.Context) {
-	infoHash := c.Param("infoHash")
-	if infoHash == "" {
-		c.Status(http.StatusBadRequest)
-		return
-	}
-
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
-	c.Writer.Header().Set("Transfer-Encoding", "chunked")
-	c.Writer.Flush()
-
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
-	stats, err := h.service.GetStats(infoHash)
-	if err == nil {
-		c.SSEvent("message", stats)
-		c.Writer.Flush()
-	}
-
-	for {
-		select {
-		case <-c.Request.Context().Done():
-			return
-		case <-ticker.C:
-			stats, err := h.service.GetStats(infoHash)
-			if err != nil {
-				continue
-			}
-			c.SSEvent("message", stats)
-			c.Writer.Flush()
-		}
-	}
 }
 
 func (h *TorrentHandler) HandleGetMetadata(c *gin.Context) {

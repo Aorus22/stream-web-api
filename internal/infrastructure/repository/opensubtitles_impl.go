@@ -2,12 +2,17 @@ package repository
 
 import (
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"time"
 
 	"github.com/kolo/xmlrpc"
 
+	"stream-web-api/internal/config"
 	"stream-web-api/internal/domain/model"
 )
 
@@ -19,16 +24,75 @@ const (
 type OpenSubtitlesClient struct {
 	endpoint  string
 	userAgent string
+	isProxy   bool
+	proxyURL  string
+	httpClient *http.Client
 }
 
-func NewOpenSubtitlesClient() *OpenSubtitlesClient {
+func NewOpenSubtitlesClient(cfg *config.OpenSubtitleConfig) *OpenSubtitlesClient {
 	return &OpenSubtitlesClient{
 		endpoint:  OpenSubtitlesXMLRPCURL,
 		userAgent: OpenSubtitlesUserAgent,
+		isProxy:   cfg.IsProxy,
+		proxyURL:  cfg.ProxyURL,
+		httpClient: &http.Client{
+			Timeout: 30 * time.Second,
+		},
 	}
 }
 
 func (c *OpenSubtitlesClient) Search(query, lang string) ([]model.Subtitle, error) {
+	if c.isProxy {
+		return c.searchViaProxy(query, lang)
+	}
+	return c.searchViaXMLRPC(query, lang)
+}
+
+func (c *OpenSubtitlesClient) searchViaProxy(query, lang string) ([]model.Subtitle, error) {
+	if c.proxyURL == "" {
+		return nil, fmt.Errorf("proxy mode enabled but PROXY_OPENSUBTITLE_URL is not set")
+	}
+
+	u, err := url.Parse(c.proxyURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid proxy URL: %w", err)
+	}
+
+	q := u.Query()
+	q.Set("query", query)
+	if lang == "" {
+		lang = "eng,ind"
+	}
+	q.Set("lang", lang)
+	u.RawQuery = q.Encode()
+
+	log.Printf("DEBUG OS: Searching via proxy - URL: %s", u.String())
+
+	resp, err := c.httpClient.Get(u.String())
+	if err != nil {
+		return nil, fmt.Errorf("proxy request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read proxy response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("proxy returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var results []model.Subtitle
+	if err := json.Unmarshal(body, &results); err != nil {
+		return nil, fmt.Errorf("failed to parse proxy response: %w", err)
+	}
+
+	log.Printf("DEBUG OS: Proxy returned %d results", len(results))
+	return results, nil
+}
+
+func (c *OpenSubtitlesClient) searchViaXMLRPC(query, lang string) ([]model.Subtitle, error) {
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	}
