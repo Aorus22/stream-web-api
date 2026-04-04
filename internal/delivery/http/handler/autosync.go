@@ -6,20 +6,17 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"torrent-stream/internal/domain"
-	autosyncUC "torrent-stream/internal/usecase/autosync"
-	subtitleUC "torrent-stream/internal/usecase/subtitle"
+	"stream-web-api/internal/domain/model"
+	uc "stream-web-api/internal/domain/usecase"
 )
 
-// AutoSyncHandler handles auto-sync requests
 type AutoSyncHandler struct {
-	autosyncService *autosyncUC.Service
-	subtitleService *subtitleUC.Service
+	autosyncService *uc.AutoSyncUsecase
+	subtitleService *uc.SubtitleUsecase
 	port            int
 }
 
-// NewAutoSyncHandler creates a new autosync handler
-func NewAutoSyncHandler(autosyncService *autosyncUC.Service, subtitleService *subtitleUC.Service, port int) *AutoSyncHandler {
+func NewAutoSyncHandler(autosyncService *uc.AutoSyncUsecase, subtitleService *uc.SubtitleUsecase, port int) *AutoSyncHandler {
 	return &AutoSyncHandler{
 		autosyncService: autosyncService,
 		subtitleService: subtitleService,
@@ -27,7 +24,6 @@ func NewAutoSyncHandler(autosyncService *autosyncUC.Service, subtitleService *su
 	}
 }
 
-// HandleAutoSync handles GET /api/subtitles/autosync
 func (h *AutoSyncHandler) HandleAutoSync(c *gin.Context) {
 	link := c.Query("link")
 	infoHash := c.Query("infoHash")
@@ -40,29 +36,25 @@ func (h *AutoSyncHandler) HandleAutoSync(c *gin.Context) {
 
 	fileIndex, _ := strconv.Atoi(fileIndexStr)
 
-	// Parse currentTime
 	currentTimeStr := c.Query("currentTime")
 	currentTime := 0.0
 	if currentTimeStr != "" {
 		currentTime, _ = strconv.ParseFloat(currentTimeStr, 64)
 	}
 
-	// Download subtitle content
 	srtContent, err := h.subtitleService.DownloadRaw(link)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to download subtitle"})
 		return
 	}
 
-	// Create request
-	req := domain.AutoSyncRequest{
+	req := model.AutoSyncRequest{
 		InfoHash:    infoHash,
 		FileIndex:   fileIndex,
 		SubLink:     link,
 		CurrentTime: currentTime,
 	}
 
-	// Calculate offset
 	result, err := h.autosyncService.CalculateOffset(req, srtContent, h.port)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "AutoSync failed: " + err.Error()})

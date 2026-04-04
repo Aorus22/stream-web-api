@@ -5,20 +5,17 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	subtitleUC "torrent-stream/internal/usecase/subtitle"
+	uc "stream-web-api/internal/domain/usecase"
 )
 
-// SubtitleHandler handles subtitle-related requests
 type SubtitleHandler struct {
-	service *subtitleUC.Service
+	service *uc.SubtitleUsecase
 }
 
-// NewSubtitleHandler creates a new subtitle handler
-func NewSubtitleHandler(service *subtitleUC.Service) *SubtitleHandler {
+func NewSubtitleHandler(service *uc.SubtitleUsecase) *SubtitleHandler {
 	return &SubtitleHandler{service: service}
 }
 
-// HandleSearch handles GET /api/subtitles/search
 func (h *SubtitleHandler) HandleSearch(c *gin.Context) {
 	query := c.Query("query")
 	if query == "" {
@@ -37,7 +34,6 @@ func (h *SubtitleHandler) HandleSearch(c *gin.Context) {
 	c.JSON(http.StatusOK, subtitles)
 }
 
-// HandleDownload handles GET /api/subtitles/download
 func (h *SubtitleHandler) HandleDownload(c *gin.Context) {
 	link := c.Query("link")
 	if link == "" {

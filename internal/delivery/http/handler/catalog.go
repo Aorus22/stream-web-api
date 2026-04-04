@@ -4,26 +4,24 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 
-	"torrent-stream/internal/infrastructure/cinemeta"
+	uc "stream-web-api/internal/domain/usecase"
+
+	"stream-web-api/internal/domain/model"
 )
 
-// CatalogHandler handles catalog/browse requests using Cinemeta (Stremio's API)
 type CatalogHandler struct {
-	client *cinemeta.Client
+	service *uc.CatalogUsecase
 }
 
-// NewCatalogHandler creates a new catalog handler
-func NewCatalogHandler(client *cinemeta.Client) *CatalogHandler {
-	return &CatalogHandler{client: client}
+func NewCatalogHandler(service *uc.CatalogUsecase) *CatalogHandler {
+	return &CatalogHandler{service: service}
 }
 
-// MediaItem represents a unified media item for the frontend
 type MediaItem struct {
-	ID          string   `json:"id"` // IMDb ID
+	ID          string   `json:"id"`
 	Title       string   `json:"title"`
 	Overview    string   `json:"overview"`
 	Poster      string   `json:"poster"`
@@ -32,11 +30,10 @@ type MediaItem struct {
 	Year        string   `json:"year"`
 	Rating      string   `json:"rating"`
 	Runtime     string   `json:"runtime"`
-	MediaType   string   `json:"mediaType"` // "movie" or "series"
+	MediaType   string   `json:"mediaType"`
 	Genres      []string `json:"genres"`
 }
 
-// MediaDetail represents detailed media info
 type MediaDetail struct {
 	ID          string        `json:"id"`
 	Title       string        `json:"title"`
@@ -72,17 +69,15 @@ type EpisodeInfo struct {
 	Overview  string `json:"overview"`
 }
 
-// CatalogResponse represents paginated catalog response
 type CatalogResponse struct {
 	Results []MediaItem `json:"results"`
 	HasMore bool        `json:"hasMore"`
 }
 
-// HandleTopMovies handles GET /api/catalog/movies
 func (h *CatalogHandler) HandleTopMovies(c *gin.Context) {
 	skip := getSkipParam(c)
 
-	metas, err := h.client.GetTopMovies(skip)
+	metas, err := h.service.GetTopMovies(skip)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -91,11 +86,10 @@ func (h *CatalogHandler) HandleTopMovies(c *gin.Context) {
 	c.JSON(http.StatusOK, h.metasToCatalog(metas, "movie"))
 }
 
-// HandleTopSeries handles GET /api/catalog/series
 func (h *CatalogHandler) HandleTopSeries(c *gin.Context) {
 	skip := getSkipParam(c)
 
-	metas, err := h.client.GetTopSeries(skip)
+	metas, err := h.service.GetTopSeries(skip)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -104,11 +98,10 @@ func (h *CatalogHandler) HandleTopSeries(c *gin.Context) {
 	c.JSON(http.StatusOK, h.metasToCatalog(metas, "series"))
 }
 
-// HandleTopRatedMovies handles GET /api/catalog/movies/top-rated
 func (h *CatalogHandler) HandleTopRatedMovies(c *gin.Context) {
 	skip := getSkipParam(c)
 
-	metas, err := h.client.GetImdbRatingMovies(skip)
+	metas, err := h.service.GetImdbRatingMovies(skip)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -117,11 +110,10 @@ func (h *CatalogHandler) HandleTopRatedMovies(c *gin.Context) {
 	c.JSON(http.StatusOK, h.metasToCatalog(metas, "movie"))
 }
 
-// HandleTopRatedSeries handles GET /api/catalog/series/top-rated
 func (h *CatalogHandler) HandleTopRatedSeries(c *gin.Context) {
 	skip := getSkipParam(c)
 
-	metas, err := h.client.GetImdbRatingSeries(skip)
+	metas, err := h.service.GetImdbRatingSeries(skip)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -130,12 +122,11 @@ func (h *CatalogHandler) HandleTopRatedSeries(c *gin.Context) {
 	c.JSON(http.StatusOK, h.metasToCatalog(metas, "series"))
 }
 
-// HandleGenreMovies handles GET /api/catalog/movies/genre/:genre
 func (h *CatalogHandler) HandleGenreMovies(c *gin.Context) {
 	genre := c.Param("genre")
 	skip := getSkipParam(c)
 
-	metas, err := h.client.GetGenreMovies(genre, skip)
+	metas, err := h.service.GetGenreMovies(genre, skip)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -144,12 +135,11 @@ func (h *CatalogHandler) HandleGenreMovies(c *gin.Context) {
 	c.JSON(http.StatusOK, h.metasToCatalog(metas, "movie"))
 }
 
-// HandleGenreSeries handles GET /api/catalog/series/genre/:genre
 func (h *CatalogHandler) HandleGenreSeries(c *gin.Context) {
 	genre := c.Param("genre")
 	skip := getSkipParam(c)
 
-	metas, err := h.client.GetGenreSeries(genre, skip)
+	metas, err := h.service.GetGenreSeries(genre, skip)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -158,7 +148,6 @@ func (h *CatalogHandler) HandleGenreSeries(c *gin.Context) {
 	c.JSON(http.StatusOK, h.metasToCatalog(metas, "series"))
 }
 
-// HandleSearchMovies handles GET /api/catalog/movies/search
 func (h *CatalogHandler) HandleSearchMovies(c *gin.Context) {
 	query := c.Query("q")
 	if query == "" {
@@ -166,10 +155,9 @@ func (h *CatalogHandler) HandleSearchMovies(c *gin.Context) {
 		return
 	}
 
-	// URL encode the query
 	encodedQuery := url.QueryEscape(query)
 
-	metas, err := h.client.SearchMovies(encodedQuery)
+	metas, err := h.service.SearchMovies(encodedQuery)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -178,7 +166,6 @@ func (h *CatalogHandler) HandleSearchMovies(c *gin.Context) {
 	c.JSON(http.StatusOK, h.metasToCatalog(metas, "movie"))
 }
 
-// HandleSearchSeries handles GET /api/catalog/series/search
 func (h *CatalogHandler) HandleSearchSeries(c *gin.Context) {
 	query := c.Query("q")
 	if query == "" {
@@ -188,7 +175,7 @@ func (h *CatalogHandler) HandleSearchSeries(c *gin.Context) {
 
 	encodedQuery := url.QueryEscape(query)
 
-	metas, err := h.client.SearchSeries(encodedQuery)
+	metas, err := h.service.SearchSeries(encodedQuery)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -197,7 +184,6 @@ func (h *CatalogHandler) HandleSearchSeries(c *gin.Context) {
 	c.JSON(http.StatusOK, h.metasToCatalog(metas, "series"))
 }
 
-// HandleMovieDetail handles GET /api/catalog/movie/:id
 func (h *CatalogHandler) HandleMovieDetail(c *gin.Context) {
 	imdbID := c.Param("id")
 	if imdbID == "" {
@@ -205,12 +191,7 @@ func (h *CatalogHandler) HandleMovieDetail(c *gin.Context) {
 		return
 	}
 
-	// Ensure it starts with "tt"
-	if !strings.HasPrefix(imdbID, "tt") {
-		imdbID = "tt" + imdbID
-	}
-
-	meta, err := h.client.GetMovieDetail(imdbID)
+	meta, err := h.service.GetMovieDetail(imdbID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -219,7 +200,6 @@ func (h *CatalogHandler) HandleMovieDetail(c *gin.Context) {
 	c.JSON(http.StatusOK, h.metaToDetail(meta, "movie"))
 }
 
-// HandleSeriesDetail handles GET /api/catalog/series/:id
 func (h *CatalogHandler) HandleSeriesDetail(c *gin.Context) {
 	imdbID := c.Param("id")
 	if imdbID == "" {
@@ -227,11 +207,7 @@ func (h *CatalogHandler) HandleSeriesDetail(c *gin.Context) {
 		return
 	}
 
-	if !strings.HasPrefix(imdbID, "tt") {
-		imdbID = "tt" + imdbID
-	}
-
-	meta, err := h.client.GetSeriesDetail(imdbID)
+	meta, err := h.service.GetSeriesDetail(imdbID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -240,7 +216,6 @@ func (h *CatalogHandler) HandleSeriesDetail(c *gin.Context) {
 	c.JSON(http.StatusOK, h.metaToDetail(meta, "series"))
 }
 
-// Helper functions
 func getSkipParam(c *gin.Context) int {
 	skipStr := c.DefaultQuery("skip", "0")
 	skip, err := strconv.Atoi(skipStr)
@@ -250,7 +225,7 @@ func getSkipParam(c *gin.Context) int {
 	return skip
 }
 
-func (h *CatalogHandler) metasToCatalog(metas []cinemeta.Meta, mediaType string) CatalogResponse {
+func (h *CatalogHandler) metasToCatalog(metas []model.Meta, mediaType string) CatalogResponse {
 	items := make([]MediaItem, 0, len(metas))
 	for _, m := range metas {
 		items = append(items, MediaItem{
@@ -269,11 +244,11 @@ func (h *CatalogHandler) metasToCatalog(metas []cinemeta.Meta, mediaType string)
 	}
 	return CatalogResponse{
 		Results: items,
-		HasMore: len(items) >= 20, // Cinemeta typically returns 20 items per page
+		HasMore: len(items) >= 20,
 	}
 }
 
-func (h *CatalogHandler) metaToDetail(meta *cinemeta.Meta, mediaType string) MediaDetail {
+func (h *CatalogHandler) metaToDetail(meta *model.Meta, mediaType string) MediaDetail {
 	trailers := make([]TrailerInfo, 0, len(meta.Trailers))
 	for _, t := range meta.Trailers {
 		trailers = append(trailers, TrailerInfo{

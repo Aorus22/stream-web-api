@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"torrent-stream/internal/domain"
+	"stream-web-api/internal/domain/model"
 )
 
 // ParseTimestamp converts SRT/VTT/ASS timestamp to seconds
@@ -36,7 +36,7 @@ func isNumeric(s string) bool {
 }
 
 // Parse converts SRT, VTT, or ASS content to SubtitleCues
-func Parse(srt []byte) []domain.SubtitleCue {
+func Parse(srt []byte) []model.SubtitleCue {
 	content := string(srt)
 	
 	// Detect ASS format
@@ -47,16 +47,16 @@ func Parse(srt []byte) []domain.SubtitleCue {
 	return parseSRT(content)
 }
 
-func parseSRT(content string) []domain.SubtitleCue {
+func parseSRT(content string) []model.SubtitleCue {
 	lines := strings.Split(content, "\n")
-	var cues []domain.SubtitleCue
+	var cues []model.SubtitleCue
 
 	reTiming := regexp.MustCompile(`(\d{2}:\d{2}:\d{2}[,.]\d{3}) --> (\d{2}:\d{2}:\d{2}[,.]\d{3})`)
 	reHtmlTags := regexp.MustCompile(`<[^>]*>`)
 	reAssTags := regexp.MustCompile(`\{[^}]*\}`)
 	reAlignTag := regexp.MustCompile(`\\an(\d)`)
 
-	var currentCue *domain.SubtitleCue
+	var currentCue *model.SubtitleCue
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -81,7 +81,7 @@ func parseSRT(content string) []domain.SubtitleCue {
 			start := ParseTimestamp(matches[1])
 			end := ParseTimestamp(matches[2])
 
-			currentCue = &domain.SubtitleCue{
+			currentCue = &model.SubtitleCue{
 				Start: start,
 				End:   end,
 				Text:  "",
@@ -119,8 +119,8 @@ func parseSRT(content string) []domain.SubtitleCue {
 	return cues
 }
 
-func parseASS(content string) []domain.SubtitleCue {
-	var cues []domain.SubtitleCue
+func parseASS(content string) []model.SubtitleCue {
+	var cues []model.SubtitleCue
 	lines := strings.Split(content, "\n")
 	
 	// Example ASS line:
@@ -163,7 +163,7 @@ func parseASS(content string) []domain.SubtitleCue {
 			text = strings.ReplaceAll(text, "\\n", "\n")
 			
 			if strings.TrimSpace(text) != "" {
-				cues = append(cues, domain.SubtitleCue{
+				cues = append(cues, model.SubtitleCue{
 					Start:    start,
 					End:      end,
 					Text:     text,

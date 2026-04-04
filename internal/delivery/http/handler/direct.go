@@ -7,14 +7,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"torrent-stream/internal/usecase/direct"
+	uc "stream-web-api/internal/domain/usecase"
 )
 
 type DirectDownloadHandler struct {
-	service *direct.Service
+	service *uc.DirectDownloadUsecase
 }
 
-func NewDirectDownloadHandler(service *direct.Service) *DirectDownloadHandler {
+func NewDirectDownloadHandler(service *uc.DirectDownloadUsecase) *DirectDownloadHandler {
 	return &DirectDownloadHandler{service: service}
 }
 
@@ -22,7 +22,6 @@ func (h *DirectDownloadHandler) HandleAddDirectDownload(c *gin.Context) {
 	var urlStr string
 	mode := c.Query("mode")
 
-	// Support form-encoded and JSON
 	urlStr = c.PostForm("url")
 	if urlStr == "" {
 		var body struct {
@@ -42,15 +41,7 @@ func (h *DirectDownloadHandler) HandleAddDirectDownload(c *gin.Context) {
 		return
 	}
 
-	var (
-		dl  interface{}
-		err error
-	)
-	if mode == "ondemand" || mode == "on_demand" || mode == "stream" {
-		dl, err = h.service.AddOnDemand(urlStr)
-	} else {
-		dl, err = h.service.AddDownload(urlStr)
-	}
+	dl, err := h.service.AddWithMode(urlStr, mode)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -60,7 +51,6 @@ func (h *DirectDownloadHandler) HandleAddDirectDownload(c *gin.Context) {
 }
 
 func (h *DirectDownloadHandler) HandleAllDirectDownloadsSSE(c *gin.Context) {
-	// Set headers for SSE
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	c.Writer.Header().Set("Cache-Control", "no-cache")
 	c.Writer.Header().Set("Connection", "keep-alive")
@@ -70,7 +60,6 @@ func (h *DirectDownloadHandler) HandleAllDirectDownloadsSSE(c *gin.Context) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
-	// Initial send
 	dls, _ := h.service.ListDownloads()
 	c.SSEvent("message", dls)
 	c.Writer.Flush()
@@ -137,7 +126,6 @@ func (h *DirectDownloadHandler) HandleDirectDownloadProgress(c *gin.Context) {
 		return
 	}
 
-	// Set headers for SSE
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	c.Writer.Header().Set("Cache-Control", "no-cache")
 	c.Writer.Header().Set("Connection", "keep-alive")

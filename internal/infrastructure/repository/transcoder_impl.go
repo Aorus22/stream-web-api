@@ -1,0 +1,710 @@
+package repository
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"math"
+	"net/http"
+	"os/exec"
+	"strconv"
+	"strings"
+	"sync"
+
+	"stream-web-api/internal/domain/model"
+)
+
+const MaxFFmpegInstances = 5
+
+type Transcoder struct {
+	FFmpegPath  string
+	FFprobePath string
+
+	semaphore chan struct{}
+
+	mu     sync.Mutex
+	active int
+}
+
+func NewTranscoder() *Transcoder {
+	ffmpegPath := "ffmpeg"
+	ffprobePath := "ffprobe"
+
+	cmd := exec.Command(ffmpegPath, "-version")
+	if err := cmd.Run(); err != nil {
+		log.Printf("⚠️ FFmpeg not found in PATH. Transcoding will not work.")
+		log.Printf("   Install FFmpeg: https://ffmpeg.org/download.html")
+		return nil
+	}
+
+	cmd2 := exec.Command(ffprobePath, "-version")
+	if err := cmd2.Run(); err != nil {
+		log.Printf("⚠️ FFprobe not found - duration detection disabled")
+		ffprobePath = ""
+	}
+
+	log.Printf("✅ FFmpeg found, transcoding enabled (max %d concurrent processes)", MaxFFmpegInstances)
+	return &Transcoder{
+		FFmpegPath:  ffmpegPath,
+		FFprobePath: ffprobePath,
+		semaphore:   make(chan struct{}, MaxFFmpegInstances),
+	}
+}
+
+func (t *Transcoder) Acquire(ctx context.Context) (release func(), err error) {
+	select {
+	case t.semaphore <- struct{}{}:
+		t.mu.Lock()
+		t.active++
+		count := t.active
+		t.mu.Unlock()
+		log.Printf("🔧 FFmpeg slot acquired (%d/%d active)", count, MaxFFmpegInstances)
+
+		return func() {
+			<-t.semaphore
+			t.mu.Lock()
+			t.active--
+			count := t.active
+			t.mu.Unlock()
+			log.Printf("🔧 FFmpeg slot released (%d/%d active)", count, MaxFFmpegInstances)
+		}, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("context cancelled while waiting for FFmpeg slot: %w", ctx.Err())
+	}
+}
+
+func (t *Transcoder) ActiveCount() int {
+	if t == nil {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.active
+}
+
+func (t *Transcoder) MaxInstances() int {
+	return MaxFFmpegInstances
+}
+
+func (t *Transcoder) TranscodeStream(ctx context.Context, w io.Writer, inputURL string, fileSize int64, filename string, startTime float64) error {
+	if t == nil {
+		return fmt.Errorf("transcoder not available (FFmpeg not found)")
+	}
+
+	httpW, ok := w.(http.ResponseWriter)
+	if !ok {
+		return fmt.Errorf("TranscodeStream requires http.ResponseWriter")
+	}
+
+	release, err := t.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to acquire FFmpeg slot: %w", err)
+	}
+	defer release()
+
+	outputFormat := "mp4"
+	contentType := "video/mp4"
+
+	log.Printf("🎬 Starting transcode: %s -> %s (start: %.1fs)", filename, outputFormat, startTime)
+
+	var args []string
+
+	args = append(args,
+		"-fflags", "+genpts+igndts",
+		"-analyzeduration", "20000000",
+		"-probesize", "20000000",
+	)
+
+	args = append(args,
+		"-i", inputURL,
+		"-v", "warning",
+	)
+
+	if startTime > 0 {
+		args = append(args, "-ss", fmt.Sprintf("%.2f", startTime))
+		args = append(args, "-copyts")
+		args = append(args, "-start_at_zero")
+	}
+
+	args = append(args,
+		"-c:v", "copy",
+		"-vsync", "2",
+		"-c:a", "aac",
+		"-b:a", "192k",
+		"-af", "aresample=async=1:first_pts=0",
+		"-sn",
+		"-movflags", "frag_keyframe+empty_moov+faststart",
+		"-f", "mp4",
+	)
+
+	args = append(args, "pipe:1")
+
+	cmd := exec.CommandContext(ctx, t.FFmpegPath, args...)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("failed to get FFmpeg stdout: %w", err)
+	}
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("failed to get FFmpeg stderr: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start FFmpeg: %w", err)
+	}
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := stderr.Read(buf)
+			if n > 0 {
+				log.Printf("FFmpeg: %s", string(buf[:n]))
+			}
+			if err != nil {
+				break
+			}
+		}
+	}()
+
+	httpW.Header().Set("Content-Type", contentType)
+	httpW.Header().Set("Transfer-Encoding", "chunked")
+	httpW.Header().Set("Cache-Control", "no-cache")
+	httpW.Header().Set("Connection", "keep-alive")
+	httpW.Header().Set("Access-Control-Allow-Origin", "*")
+
+	buf := make([]byte, 64*1024)
+	flusher, canFlush := httpW.(http.Flusher)
+
+	for {
+		n, err := stdout.Read(buf)
+		if n > 0 {
+			_, writeErr := httpW.Write(buf[:n])
+			if writeErr != nil {
+				log.Printf("Client disconnected: %v", writeErr)
+				cmd.Process.Kill()
+				break
+			}
+			if canFlush {
+				flusher.Flush()
+			}
+		}
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("FFmpeg read error: %v", err)
+			}
+			break
+		}
+	}
+
+	cmd.Wait()
+
+	log.Printf("✅ Transcode complete: %s", filename)
+	return nil
+}
+
+type ReencodeProgress = model.ReencodeProgress
+
+func (t *Transcoder) ReencodeToFile(ctx context.Context, inputURL string, outputPath string, resolution string, bitrate string, onProgress func(ReencodeProgress)) error {
+	if t == nil {
+		return fmt.Errorf("transcoder not available")
+	}
+
+	duration, err := t.GetVideoDurationFromURL(inputURL)
+	if err != nil {
+		log.Printf("⚠️ Could not get duration for progress: %v", err)
+		duration = 0
+	}
+
+	release, err := t.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to acquire FFmpeg slot: %w", err)
+	}
+	defer release()
+
+	log.Printf("🎬 Reencoding to file: %s (Res: %s, Bitrate: %s)", outputPath, resolution, bitrate)
+
+	args := []string{
+		"-fflags", "+genpts+igndts",
+		"-i", inputURL,
+		"-c:v", "libx264",
+		"-preset", "veryfast",
+		"-vf", fmt.Sprintf("scale=%s", resolution),
+		"-b:v", bitrate,
+		"-maxrate", bitrate,
+		"-bufsize", "4000k",
+		"-c:a", "aac",
+		"-b:a", "128k",
+		"-movflags", "+faststart",
+		"-progress", "pipe:2",
+		"-y",
+		outputPath,
+	}
+
+	cmd := exec.CommandContext(ctx, t.FFmpegPath, args...)
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("failed to get stderr: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start ffmpeg: %w", err)
+	}
+
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.HasPrefix(line, "out_time_ms=") {
+				msStr := strings.TrimPrefix(line, "out_time_ms=")
+				ms, _ := strconv.ParseInt(msStr, 10, 64)
+				if duration > 0 && ms > 0 {
+					percent := (float64(ms) / 1000000.0) / duration * 100.0
+					if percent > 100 {
+						percent = 100
+					}
+					if onProgress != nil {
+						onProgress(ReencodeProgress{
+							Percent: percent,
+							Time:    fmt.Sprintf("%.1fs", float64(ms)/1000000.0),
+						})
+					}
+				}
+			}
+			if strings.HasPrefix(line, "speed=") {
+			}
+		}
+	}()
+
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("reencode error: %w", err)
+	}
+
+	log.Printf("✅ Reencode complete: %s", outputPath)
+	return nil
+}
+
+func (t *Transcoder) GetStreamDetails(inputURL string) (videoCodec, audioCodec string, err error) {
+	if t == nil || t.FFprobePath == "" {
+		return "", "", fmt.Errorf("FFprobe not available")
+	}
+
+	release, acquireErr := t.Acquire(context.Background())
+	if acquireErr != nil {
+		return "", "", fmt.Errorf("failed to acquire FFmpeg slot: %w", acquireErr)
+	}
+	defer release()
+
+	args := []string{
+		"-v", "error",
+		"-show_entries", "stream=codec_name,codec_type",
+		"-of", "json",
+		inputURL,
+	}
+
+	cmd := exec.Command(t.FFprobePath, args...)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", "", fmt.Errorf("ffprobe error: %w", err)
+	}
+
+	type ProbeStream struct {
+		CodecName string `json:"codec_name"`
+		CodecType string `json:"codec_type"`
+	}
+	type ProbeResult struct {
+		Streams []ProbeStream `json:"streams"`
+	}
+
+	var result ProbeResult
+	if err := json.Unmarshal(output, &result); err != nil {
+		return "", "", fmt.Errorf("json parse error: %w", err)
+	}
+
+	for _, s := range result.Streams {
+		if s.CodecType == "video" && videoCodec == "" {
+			videoCodec = s.CodecName
+		}
+		if s.CodecType == "audio" && audioCodec == "" {
+			audioCodec = s.CodecName
+		}
+	}
+
+	return videoCodec, audioCodec, nil
+}
+
+func (t *Transcoder) TranscodeSegment(ctx context.Context, w io.Writer, inputURL string, startTime float64, duration float64, srcVideoCodec, srcAudioCodec string) error {
+	if t == nil {
+		return fmt.Errorf("transcoder not available")
+	}
+
+	release, err := t.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to acquire FFmpeg slot: %w", err)
+	}
+	defer release()
+
+	vCodec := "libx264"
+	aCodec := "aac"
+
+	args := []string{
+		"-fflags", "+genpts+igndts",
+		"-ss", fmt.Sprintf("%.6f", startTime),
+		"-t", fmt.Sprintf("%.6f", duration),
+		"-i", inputURL,
+		"-map", "0:v:0",
+		"-map", "0:a:0",
+		"-c:v", vCodec,
+	}
+
+	if vCodec != "copy" {
+		args = append(args,
+			"-preset", "ultrafast",
+			"-tune", "zerolatency",
+			"-sc_threshold", "0",
+			"-force_key_frames", fmt.Sprintf("expr:gte(t,n_forced*%.6f)", duration),
+		)
+	}
+
+	args = append(args,
+		"-vsync", "2",
+		"-c:a", aCodec,
+		"-ar", "44100",
+		"-ac", "2",
+		"-b:a", "128k",
+		"-af", "aresample=async=1:first_pts=0",
+	)
+
+	args = append(args,
+		"-f", "mpegts",
+		"-copyts",
+		"-start_at_zero",
+		"-y",
+		"pipe:1",
+	)
+
+	cmd := exec.CommandContext(ctx, t.FFmpegPath, args...)
+
+	cmd.Stdout = w
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	log.Printf("🎞️ Generating Segment (V:%s, A:%s): Start %.2f, Dur %.2f", vCodec, aCodec, startTime, duration)
+
+	if err := cmd.Run(); err != nil {
+		log.Printf("❌ FFmpeg Error Output:\n%s", stderr.String())
+		return fmt.Errorf("ffmpeg segment error: %w", err)
+	}
+
+	return nil
+}
+
+func (t *Transcoder) GetVideoDuration(reader io.Reader) (float64, error) {
+	if t == nil || t.FFprobePath == "" {
+		return 0, fmt.Errorf("FFprobe not available")
+	}
+
+	release, err := t.Acquire(context.Background())
+	if err != nil {
+		return 0, fmt.Errorf("failed to acquire FFmpeg slot: %w", err)
+	}
+	defer release()
+
+	args := []string{
+		"-v", "error",
+		"-show_entries", "format=duration",
+		"-of", "default=noprint_wrappers=1:nokey=1",
+		"pipe:0",
+	}
+
+	cmd := exec.Command(t.FFprobePath, args...)
+	cmd.Stdin = reader
+
+	output, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("ffprobe error: %w", err)
+	}
+
+	durationStr := strings.TrimSpace(string(output))
+	duration, err := strconv.ParseFloat(durationStr, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid duration output: %s", durationStr)
+	}
+
+	return duration, nil
+}
+
+func (t *Transcoder) GetVideoDurationFromURL(inputURL string) (float64, error) {
+	if t == nil || t.FFprobePath == "" {
+		return 0, fmt.Errorf("FFprobe not available")
+	}
+
+	release, err := t.Acquire(context.Background())
+	if err != nil {
+		return 0, fmt.Errorf("failed to acquire FFmpeg slot: %w", err)
+	}
+	defer release()
+
+	args := []string{
+		"-v", "error",
+		"-show_entries", "format=duration",
+		"-of", "default=noprint_wrappers=1:nokey=1",
+		inputURL,
+	}
+
+	cmd := exec.Command(t.FFprobePath, args...)
+	output, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("ffprobe error: %w", err)
+	}
+
+	durationStr := strings.TrimSpace(string(output))
+	duration, err := strconv.ParseFloat(durationStr, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid duration output: %s", durationStr)
+	}
+
+	return duration, nil
+}
+
+type SubtitleStream = model.SubtitleStream
+
+func (t *Transcoder) GetEmbeddedSubtitles(inputURL string) ([]SubtitleStream, error) {
+	if t == nil || t.FFprobePath == "" {
+		return nil, fmt.Errorf("FFprobe not available")
+	}
+
+	release, err := t.Acquire(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire FFmpeg slot: %w", err)
+	}
+	defer release()
+
+	return t.getEmbeddedSubtitlesJSON(inputURL)
+}
+
+func (t *Transcoder) getEmbeddedSubtitlesJSON(inputURL string) ([]SubtitleStream, error) {
+	args := []string{
+		"-v", "error",
+		"-analyzeduration", "10000000",
+		"-probesize", "10000000",
+		"-select_streams", "s",
+		"-show_entries", "stream=index,codec_name:stream_tags=language,title",
+		"-of", "json",
+		inputURL,
+	}
+
+	cmd := exec.Command(t.FFprobePath, args...)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+
+	type ProbeResult struct {
+		Streams []struct {
+			Index     int    `json:"index"`
+			CodecName string `json:"codec_name"`
+			Tags      struct {
+				Language string `json:"language"`
+				Title    string `json:"title"`
+			} `json:"tags"`
+		} `json:"streams"`
+	}
+
+	var result ProbeResult
+	if err := json.Unmarshal(output, &result); err != nil {
+		return nil, err
+	}
+
+	var subs []SubtitleStream
+	for _, s := range result.Streams {
+		title := s.Tags.Title
+
+		if title == "" && s.Tags.Language != "" {
+			title = getLanguageName(s.Tags.Language)
+		}
+
+		subs = append(subs, SubtitleStream{
+			Index:    s.Index,
+			Codec:    s.CodecName,
+			Language: s.Tags.Language,
+			Title:    title,
+		})
+	}
+
+	return subs, nil
+}
+
+func getLanguageName(code string) string {
+	code = strings.ToLower(code)
+	langMap := map[string]string{
+		"eng": "English",
+		"jpn": "Japanese",
+		"ind": "Indonesian",
+		"spa": "Spanish",
+		"fre": "French",
+		"fra": "French",
+		"ger": "German",
+		"deu": "German",
+		"ita": "Italian",
+		"rus": "Russian",
+		"por": "Portuguese",
+		"chi": "Chinese",
+		"zho": "Chinese",
+		"kor": "Korean",
+		"ara": "Arabic",
+		"hin": "Hindi",
+		"ben": "Bengali",
+		"tha": "Thai",
+		"vie": "Vietnamese",
+		"may": "Malay",
+		"msa": "Malay",
+		"dut": "Dutch",
+		"nld": "Dutch",
+		"pol": "Polish",
+		"tur": "Turkish",
+	}
+
+	if name, ok := langMap[code]; ok {
+		return name
+	}
+	return strings.ToUpper(code)
+}
+
+func (t *Transcoder) ExtractSubtitle(inputURL string, streamIndex int, w io.Writer) error {
+	if t == nil {
+		return fmt.Errorf("transcoder not available")
+	}
+
+	release, err := t.Acquire(context.Background())
+	if err != nil {
+		return fmt.Errorf("failed to acquire FFmpeg slot: %w", err)
+	}
+	defer release()
+
+	args := []string{
+		"-analyzeduration", "5000000",
+		"-probesize", "5000000",
+		"-i", inputURL,
+		"-map", fmt.Sprintf("0:%d", streamIndex),
+		"-vn",
+		"-an",
+		"-dn",
+		"-f", "srt",
+		"-v", "quiet",
+		"pipe:1",
+	}
+
+	cmd := exec.Command(t.FFmpegPath, args...)
+	cmd.Stdout = w
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to extract subtitle: %w", err)
+	}
+
+	return nil
+}
+
+func (t *Transcoder) ExtractAudioSignature(inputURL string, startTime float64, durationSec int, sampleRate int, windowMs int, threshold float64) ([]float64, error) {
+	if t == nil {
+		return nil, fmt.Errorf("no transcoder")
+	}
+
+	release, err := t.Acquire(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire FFmpeg slot: %w", err)
+	}
+	defer release()
+
+	args := []string{
+		"-ss", fmt.Sprintf("%.2f", startTime),
+		"-i", inputURL,
+		"-t", strconv.Itoa(durationSec),
+		"-ac", "1",
+		"-ar", strconv.Itoa(sampleRate),
+		"-f", "f32le",
+		"-v", "quiet",
+		"pipe:1",
+	}
+
+	cmd := exec.Command(t.FFmpegPath, args...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	var samples []float32
+	bytesBuf := make([]byte, 4096)
+
+	for {
+		n, err := stdout.Read(bytesBuf)
+		if n > 0 {
+			for i := 0; i < n; i += 4 {
+				if i+4 > n {
+					break
+				}
+				bits := binary.LittleEndian.Uint32(bytesBuf[i : i+4])
+				f := math.Float32frombits(bits)
+				samples = append(samples, f)
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	cmd.Wait()
+
+	log.Printf("DEBUG: Extracted %d float samples from FFmpeg", len(samples))
+
+	maxVal := 0.0
+	for _, s := range samples {
+		abs := math.Abs(float64(s))
+		if abs > maxVal {
+			maxVal = abs
+		}
+	}
+
+	scale := 1.0
+	if maxVal > 0 {
+		scale = 1.0 / maxVal
+	}
+
+	log.Printf("DEBUG: Audio Normalization. Max Peak: %.4f, Scale: %.2f", maxVal, scale)
+
+	samplesPerWin := sampleRate * windowMs / 1000
+	var activity []float64
+
+	for i := 0; i < len(samples); i += samplesPerWin {
+		end := i + samplesPerWin
+		if end > len(samples) {
+			end = len(samples)
+		}
+
+		sum := 0.0
+		for j := i; j < end; j++ {
+			val := float64(samples[j]) * scale
+			sum += val * val
+		}
+		rms := math.Sqrt(sum / float64(end-i))
+
+		if rms > threshold {
+			activity = append(activity, 1.0)
+		} else {
+			activity = append(activity, 0.0)
+		}
+	}
+
+	return activity, nil
+}

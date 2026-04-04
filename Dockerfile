@@ -13,7 +13,7 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux go build -a -ldflags '-s -w' -o torrent-stream .
+RUN CGO_ENABLED=0 GOOS=linux go build -a -ldflags '-s -w' -o stream-web-api ./cmd/app
 
 FROM alpine:3.19
 
@@ -24,10 +24,10 @@ RUN apk add --no-cache \
 
 WORKDIR /app
 
-COPY --from=builder /app/torrent-stream .
+COPY --from=builder /app/stream-web-api .
 
 RUN mkdir -p /app/data /app/torrent_data /app/hls_cache
 
 EXPOSE 6432
 
-CMD ["./torrent-stream"]
+CMD ["./stream-web-api"]
