@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"time"
 
 	"stream-web-api/internal/config"
 	"stream-web-api/internal/delivery/http"
@@ -73,11 +74,16 @@ func main() {
 
 	streamService := usecase.NewStreamUsecase(torrentService, directService, transcoder, cfg.CacheDir, cfg.Port)
 
+	hlsSessionMgr := usecase.NewHLSSessionManager(torrentService, streamService, cfg.Port, cfg.HLSLiveDir)
+	go hlsSessionMgr.StartCleanup(5*time.Minute, 1*time.Minute)
+	defer hlsSessionMgr.Cleanup()
+
 	cacheService := usecase.NewCacheUsecase(cfg.CacheDir, cfg.DirectCacheDir, cfg.HLSCacheDir, torrentService, directService, gdriveClient)
 	cacheService.SetStreamService(streamService)
 
 	torrentHandler := handler.NewTorrentHandler(torrentService)
 	streamHandler := handler.NewStreamHandler(streamService, torrentService, directService, cfg.CacheDir)
+	hlsLiveHandler := handler.NewHLSLiveHandler(hlsSessionMgr)
 	subtitleHandler := handler.NewSubtitleHandler(subtitleService)
 	autosyncHandler := handler.NewAutoSyncHandler(autosyncService, subtitleService, cfg.Port)
 	catalogHandler := handler.NewCatalogHandler(catalogService)
@@ -92,6 +98,7 @@ func main() {
 		cfg.Port,
 		torrentHandler,
 		streamHandler,
+		hlsLiveHandler,
 		subtitleHandler,
 		autosyncHandler,
 		catalogHandler,

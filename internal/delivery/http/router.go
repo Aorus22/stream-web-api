@@ -48,6 +48,10 @@ func SetupRouter(s *Server) *gin.Engine {
 	r.GET("/hls/:infoHash/:fileIndex/playlist.m3u8", s.streamHandler.HandleHLSMasterPlaylist)
 	r.GET("/hls/:infoHash/:fileIndex/segment/:segment", s.streamHandler.HandleHLSSegment)
 
+	r.POST("/hls-live/start", s.hlsLiveHandler.StartHLSStream)
+	r.GET("/hls-live/:id/*file", s.hlsLiveHandler.ServeHLSFile)
+	r.DELETE("/hls-live/:id", s.hlsLiveHandler.StopHLSStream)
+
 	r.GET("/api/subtitles/search", s.subtitleHandler.HandleSearch)
 	r.GET("/api/subtitles/download", s.subtitleHandler.HandleDownload)
 	r.GET("/api/subtitles/autosync", s.autosyncHandler.HandleAutoSync)

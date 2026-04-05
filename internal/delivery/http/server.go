@@ -14,6 +14,7 @@ type Server struct {
 	port                  int
 	torrentHandler        *handler.TorrentHandler
 	streamHandler         *handler.StreamHandler
+	hlsLiveHandler        *handler.HLSLiveHandler
 	subtitleHandler       *handler.SubtitleHandler
 	autosyncHandler       *handler.AutoSyncHandler
 	catalogHandler        *handler.CatalogHandler
@@ -28,6 +29,7 @@ func NewServer(
 	port int,
 	torrentHandler *handler.TorrentHandler,
 	streamHandler *handler.StreamHandler,
+	hlsLiveHandler *handler.HLSLiveHandler,
 	subtitleHandler *handler.SubtitleHandler,
 	autosyncHandler *handler.AutoSyncHandler,
 	catalogHandler *handler.CatalogHandler,
@@ -41,6 +43,7 @@ func NewServer(
 		port:                  port,
 		torrentHandler:        torrentHandler,
 		streamHandler:         streamHandler,
+		hlsLiveHandler:        hlsLiveHandler,
 		subtitleHandler:       subtitleHandler,
 		autosyncHandler:       autosyncHandler,
 		catalogHandler:        catalogHandler,

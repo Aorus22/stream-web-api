@@ -13,6 +13,7 @@ type Config struct {
 	CacheDir       string
 	HLSCacheDir    string
 	DirectCacheDir string
+	HLSLiveDir     string
 }
 
 func Load() *Config {
@@ -40,12 +41,18 @@ func Load() *Config {
 
 	directCacheDir := filepath.Join(cacheDir, "direct_downloads")
 
+	hlsLiveDir := os.Getenv("HLS_LIVE_DIR")
+	if hlsLiveDir == "" {
+		hlsLiveDir = "/dev/shm/hls"
+	}
+
 	cfg := &Config{
 		Port:           port,
 		DataDir:        dataDir,
 		CacheDir:       cacheDir,
 		HLSCacheDir:    hlsCacheDir,
 		DirectCacheDir: directCacheDir,
+		HLSLiveDir:     hlsLiveDir,
 	}
 
 	return cfg
