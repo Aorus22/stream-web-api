@@ -549,6 +549,119 @@ func (h *StreamHandler) HandleHLSSegment(c *gin.Context) {
 	}
 }
 
+func (h *StreamHandler) HandleStaticPrepare(c *gin.Context) {
+	var req struct {
+		InfoHash  string `json:"infoHash"`
+		FileIndex int    `json:"fileIndex"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		return
+	}
+
+	if req.InfoHash == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "infoHash required"})
+		return
+	}
+
+	if !h.torrentService.IsTorrentReady(req.InfoHash) {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Torrent metadata not ready"})
+		return
+	}
+
+	if err := h.torrentService.StartFileDownload(req.InfoHash, req.FileIndex); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "preparing"})
+}
+
+func (h *StreamHandler) HandleStaticStream(c *gin.Context) {
+	infoHash := c.Param("infoHash")
+	fileIndex, err := strconv.Atoi(c.Param("fileIndex"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file index"})
+		return
+	}
+
+	if !h.torrentService.IsTorrentReady(infoHash) {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Torrent metadata not ready"})
+		return
+	}
+
+	fileInfo, err := h.torrentService.GetFileInfo(infoHash, fileIndex)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	if fileInfo.Progress < 100.0 {
+		c.JSON(http.StatusTooEarly, gin.H{
+			"error":   "File not fully downloaded",
+			"progress": fileInfo.Progress,
+		})
+		return
+	}
+
+	contentType := h.torrentService.GetMimeType(fileInfo.Name)
+	fileSize := fileInfo.Length
+
+	rangeHeader := c.GetHeader("Range")
+	var start, end int64 = 0, fileSize - 1
+	isRange := false
+
+	if rangeHeader != "" {
+		isRange = true
+		_, parseErr := fmt.Sscanf(rangeHeader, "bytes=%d-", &start)
+		if parseErr != nil {
+			start = 0
+		}
+		if strings.Contains(rangeHeader, "-") {
+			parts := strings.Split(strings.TrimPrefix(rangeHeader, "bytes="), "-")
+			if len(parts) == 2 && parts[1] != "" {
+				end, _ = strconv.ParseInt(parts[1], 10, 64)
+			}
+		}
+		if end > fileSize-1 {
+			end = fileSize - 1
+		}
+		if start < 0 {
+			start = 0
+		}
+		if start > end {
+			start = 0
+			end = fileSize - 1
+			isRange = false
+		}
+	}
+
+	reader, err := h.torrentService.GetFileReader(infoHash, fileIndex, start, end)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get file reader"})
+		return
+	}
+
+	contentLength := end - start + 1
+
+	c.Header("Content-Type", contentType)
+	c.Header("Accept-Ranges", "bytes")
+	c.Header("Content-Length", strconv.FormatInt(contentLength, 10))
+
+	if isRange {
+		c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, fileSize))
+		c.Status(http.StatusPartialContent)
+	} else {
+		c.Status(http.StatusOK)
+	}
+
+	if closer, ok := reader.(io.Closer); ok {
+		defer closer.Close()
+	}
+
+	h.copyWithTimeout(c.Writer, reader, contentLength, c.Request.Context())
+}
+
 func (h *StreamHandler) copyWithTimeout(w io.Writer, r io.Reader, length int64, ctx context.Context) {
 	buf := make([]byte, 64*1024)
 	written := int64(0)

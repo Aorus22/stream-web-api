@@ -34,6 +34,8 @@ func SetupRouter(s *Server) *gin.Engine {
 	r.GET("/api/torrent/metadata/:infoHash", s.torrentHandler.HandleGetMetadata)
 
 	r.GET("/stream/:infoHash/:fileIndex", s.streamHandler.HandleStream)
+	r.GET("/stream/static/:infoHash/:fileIndex", s.streamHandler.HandleStaticStream)
+	r.POST("/api/static/prepare", s.streamHandler.HandleStaticPrepare)
 	r.GET("/transcode/:infoHash/:fileIndex", s.streamHandler.HandleTranscode)
 	r.POST("/api/reencode", s.streamHandler.HandleReencode)
 	r.POST("/api/reencode/cancel", s.streamHandler.HandleCancelReencode)
