@@ -78,6 +78,10 @@ func (s *TorrentUsecase) IsTorrentReady(infoHash string) bool {
 	return s.client.IsTorrentReady(infoHash)
 }
 
+func (s *TorrentUsecase) GetFileDiskPath(infoHash string, fileIndex int) (string, error) {
+	return s.client.GetFileDiskPath(infoHash, fileIndex)
+}
+
 func (s *TorrentUsecase) NeedsTranscoding(filename string) bool {
 	return s.client.NeedsTranscoding(filename)
 }

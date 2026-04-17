@@ -37,5 +37,6 @@ type TorrentClient interface {
 	GetProviders() []string
 	NeedsTranscoding(filename string) bool
 	GetMimeType(filename string) string
+	GetFileDiskPath(infoHash string, fileIndex int) (string, error)
 	Close()
 }

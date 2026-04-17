@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/url"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -782,4 +783,34 @@ func getPortStr(port int) string {
 		return "8080"
 	}
 	return strconv.Itoa(port)
+}
+
+func (c *Client) GetFileDiskPath(infoHashHex string, fileIndex int) (string, error) {
+	t := c.GetTorrent(infoHashHex)
+	if t == nil {
+		return "", fmt.Errorf("torrent not found")
+	}
+	if t.Info() == nil {
+		return "", fmt.Errorf("no metadata")
+	}
+	files := t.Files()
+	if fileIndex < 0 || fileIndex >= len(files) {
+		return "", fmt.Errorf("invalid file index")
+	}
+
+	upvertedFiles := t.Info().UpvertedFiles()
+	if fileIndex >= len(upvertedFiles) {
+		return "", fmt.Errorf("invalid file index in upverted files")
+	}
+
+	fileInfo := upvertedFiles[fileIndex]
+
+	parts := []string{c.cacheDir}
+	bestName := t.Info().BestName()
+	if bestName != "" {
+		parts = append(parts, bestName)
+	}
+	parts = append(parts, fileInfo.BestPath()...)
+
+	return filepath.Join(parts...), nil
 }

@@ -598,14 +598,33 @@ func (h *StreamHandler) HandleStaticStream(c *gin.Context) {
 
 	if fileInfo.Progress < 100.0 {
 		c.JSON(http.StatusTooEarly, gin.H{
-			"error":   "File not fully downloaded",
+			"error":    "File not fully downloaded",
 			"progress": fileInfo.Progress,
 		})
 		return
 	}
 
+	diskPath, err := h.torrentService.GetFileDiskPath(infoHash, fileIndex)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to resolve file path"})
+		return
+	}
+
+	f, err := os.Open(diskPath)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "File not found on disk"})
+		return
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to stat file"})
+		return
+	}
+
+	fileSize := info.Size()
 	contentType := h.torrentService.GetMimeType(fileInfo.Name)
-	fileSize := fileInfo.Length
 
 	rangeHeader := c.GetHeader("Range")
 	var start, end int64 = 0, fileSize - 1
@@ -636,12 +655,6 @@ func (h *StreamHandler) HandleStaticStream(c *gin.Context) {
 		}
 	}
 
-	reader, err := h.torrentService.GetFileReader(infoHash, fileIndex, start, end)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get file reader"})
-		return
-	}
-
 	contentLength := end - start + 1
 
 	c.Header("Content-Type", contentType)
@@ -655,11 +668,11 @@ func (h *StreamHandler) HandleStaticStream(c *gin.Context) {
 		c.Status(http.StatusOK)
 	}
 
-	if closer, ok := reader.(io.Closer); ok {
-		defer closer.Close()
+	if _, err := f.Seek(start, io.SeekStart); err != nil {
+		return
 	}
 
-	h.copyWithTimeout(c.Writer, reader, contentLength, c.Request.Context())
+	_, _ = io.CopyN(c.Writer, f, contentLength)
 }
 
 func (h *StreamHandler) copyWithTimeout(w io.Writer, r io.Reader, length int64, ctx context.Context) {
