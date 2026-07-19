@@ -2,7 +2,7 @@ services:
   api:
     build:
       context: .
-      dockerfile: Dockerfile.dev.separated
+      dockerfile: Dockerfile.dev
     container_name: torrent-stream-api-dev
     volumes:
       - .:/app

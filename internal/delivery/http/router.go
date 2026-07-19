@@ -94,5 +94,12 @@ func SetupRouter(s *Server) *gin.Engine {
 	r.PUT("/api/custom-providers/:id", s.customProviderHandler.HandleUpdate)
 	r.DELETE("/api/custom-providers/:id", s.customProviderHandler.HandleDelete)
 
+	r.Static("/assets", "./static/assets")
+	r.StaticFile("/vite.svg", "./static/vite.svg")
+
+	r.NoRoute(func(c *gin.Context) {
+		c.File("./static/index.html")
+	})
+
 	return r
 }

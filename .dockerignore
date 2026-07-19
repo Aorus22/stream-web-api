@@ -47,6 +47,10 @@ cache/
 .env
 .env.local
 
+# Web (rebuilt in multi-stage build)
+web/dist/
+web/.env
+
 # Storage (mounted as volumes)
 data/
 torrent_data/
