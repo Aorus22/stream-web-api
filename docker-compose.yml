@@ -15,6 +15,18 @@ services:
       - ./torrent_data:/app/torrent_data
       - ./hls_cache:/app/hls_cache
 
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    image: aorus22/video-player-web:latest
+    container_name: video-player-web
+    restart: unless-stopped
+    ports:
+      - "6431:5000"
+    depends_on:
+      - api
+
 volumes:
   data:
   torrent_data:
