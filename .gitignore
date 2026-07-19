@@ -29,6 +29,9 @@ Thumbs.db
 cache/
 .cache/
 
+# Build output
+release/
+
 # Environment
 .env
 .env.local
